@@ -1,0 +1,73 @@
+name: CI
+
+# 触发条件：push 到 main 分支，或任何针对 main 的 Pull Request
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ============== Job 1: 语法检查 ==============
+  lint:
+    name: Python 语法检查
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 检查所有 .py 文件能否编译
+        run: |
+          python -m compileall -q app scripts
+          echo "✅ 所有 Python 文件语法检查通过"
+
+  # ============== Job 2: 依赖安装验证 ==============
+  install:
+    name: 依赖安装验证
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 3.11（带 pip 缓存）
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: 升级 pip
+        run: python -m pip install --upgrade pip
+
+      - name: 安装项目依赖
+        run: pip install -r requirements.txt
+
+      - name: 验证关键模块可导入
+        run: |
+          python -c "import fastapi, uvicorn, chromadb, langchain, gradio; print('✅ 关键依赖导入成功')"
+
+  # ============== Job 3: Docker 镜像构建 ==============
+  docker-build:
+    name: Docker 镜像构建验证
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Docker Buildx（带缓存能力）
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建 Docker 镜像（仅构建不推送）
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: my-rag:ci-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,5 +1,9 @@
 # 企业级RAG知识库系统
 
+[![CI](https://github.com/2024150227/My-RAG/actions/workflows/ci.yml/badge.svg)](https://github.com/2024150227/My-RAG/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 基于LangChain + ChromaDB + Ollama构建的企业级检索增强生成(RAG)知识库系统，支持文档上传、智能问答、语义检索等功能。
 
 ## 功能特性
