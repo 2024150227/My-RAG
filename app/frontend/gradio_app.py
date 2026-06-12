@@ -489,4 +489,12 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
         """)
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    # 如果 .env 配置了 GRADIO_AUTH_USER/PASSWORD，则启用 basic auth
+    auth = None
+    try:
+        if settings.GRADIO_AUTH_USER and settings.GRADIO_AUTH_PASSWORD:
+            auth = (settings.GRADIO_AUTH_USER, settings.GRADIO_AUTH_PASSWORD)
+            print(f"[Gradio] basic auth 已启用，用户: {settings.GRADIO_AUTH_USER}")
+    except Exception:
+        pass
+    demo.launch(server_name="0.0.0.0", server_port=7860, auth=auth)
