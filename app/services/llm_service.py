@@ -15,49 +15,94 @@ SYSTEM_PROMPT = """
 模型回复：交互式建模（DSW）计费包含四类：按量付费、预付费、资源包、节省计划。
 """
 
+
+def _build_prompt(prompt: str, context: str) -> str:
+    if context:
+        return f"{SYSTEM_PROMPT}\n\n参考文档：\n{context}\n\n用户问题：{prompt}\n\n回答："
+    return f"{SYSTEM_PROMPT}\n\n用户问题：{prompt}\n\n回答："
+
+
 class LLMService:
+    """LLM 服务，支持 ollama（本地） 与 siliconflow（云端 API）两种 provider。"""
+
     def __init__(self):
-        self.base_url = settings.OLLAMA_BASE_URL
-        self.model_name = settings.OLLAMA_MODEL
+        self.provider = settings.LLM_PROVIDER
         self.temperature = settings.TEMPERATURE
         self.max_tokens = settings.MAX_TOKENS
-    
+
+        # ollama
+        self.ollama_base_url = settings.OLLAMA_BASE_URL
+        self.ollama_model = settings.OLLAMA_MODEL
+
+        # siliconflow
+        self.sf_url = settings.SILICONFLOW_LLM_URL
+        self.sf_model = settings.SILICONFLOW_LLM_MODEL
+        self.sf_api_key = settings.SILICONFLOW_API_KEY
+
+        logger.info(f"LLMService 初始化: provider={self.provider}")
+
     def generate(self, prompt: str, context: str = "") -> str:
-        if context:
-            full_prompt = f"{SYSTEM_PROMPT}\n\n参考文档：\n{context}\n\n用户问题：{prompt}\n\n回答："
-        else:
-            full_prompt = f"{SYSTEM_PROMPT}\n\n用户问题：{prompt}\n\n回答："
-        
-        headers = {
-            "Content-Type": "application/json"
-        }
+        full_prompt = _build_prompt(prompt, context)
+        if self.provider == "siliconflow":
+            return self._generate_siliconflow(full_prompt)
+        return self._generate_ollama(full_prompt)
+
+    # ----------------------- Ollama -----------------------
+    def _generate_ollama(self, full_prompt: str) -> str:
         data = {
-            "model": self.model_name,
+            "model": self.ollama_model,
             "prompt": full_prompt,
             "stream": False,
             "options": {
                 "temperature": self.temperature,
-                "num_predict": self.max_tokens
-            }
+                "num_predict": self.max_tokens,
+            },
         }
-        
         try:
             response = requests.post(
-                f"{self.base_url}/api/generate",
-                headers=headers,
+                f"{self.ollama_base_url}/api/generate",
+                headers={"Content-Type": "application/json"},
                 json=data,
-                timeout=120
+                timeout=120,
             )
             response.raise_for_status()
             result = response.json()
-            
-            if 'response' in result:
-                return result['response'].strip()
-            else:
-                logger.error("LLM返回格式错误")
-                return "抱歉，未能生成回答"
+            if "response" in result:
+                return result["response"].strip()
+            logger.error("LLM返回格式错误")
+            return "抱歉，未能生成回答"
         except requests.exceptions.RequestException as e:
-            logger.error(f"LLM调用失败: {str(e)}")
+            logger.error(f"LLM调用失败(ollama): {str(e)}")
             return f"LLM调用失败: {str(e)}"
+
+    # --------------------- SiliconFlow ---------------------
+    def _generate_siliconflow(self, full_prompt: str) -> str:
+        if not self.sf_api_key:
+            logger.error("SILICONFLOW_API_KEY 未配置")
+            return "LLM调用失败: SILICONFLOW_API_KEY 未配置"
+
+        data = {
+            "model": self.sf_model,
+            "messages": [{"role": "user", "content": full_prompt}],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": False,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.sf_api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            response = requests.post(self.sf_url, headers=headers, json=data, timeout=120)
+            response.raise_for_status()
+            result = response.json()
+            return result["choices"][0]["message"]["content"].strip()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"LLM调用失败(siliconflow): {str(e)}")
+            return f"LLM调用失败: {str(e)}"
+        except (KeyError, IndexError, ValueError) as e:
+            logger.error(f"LLM返回解析失败(siliconflow): {str(e)}")
+            return "抱歉，未能生成回答"
+
 
 llm_service = LLMService()

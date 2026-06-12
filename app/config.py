@@ -12,6 +12,15 @@ class Settings:
     # Ollama配置
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen:latest")
+
+    # LLM 提供方：ollama（默认，本地） / siliconflow（云端 API）
+    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
+    SILICONFLOW_LLM_URL = os.getenv("SILICONFLOW_LLM_URL", "https://api.siliconflow.cn/v1/chat/completions")
+    SILICONFLOW_LLM_MODEL = os.getenv("SILICONFLOW_LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+
+    # Gradio 访问鉴权（用户名,密码；为空表示不启用）
+    GRADIO_AUTH_USER = os.getenv("GRADIO_AUTH_USER", "")
+    GRADIO_AUTH_PASSWORD = os.getenv("GRADIO_AUTH_PASSWORD", "")
     
     # Redis配置
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
