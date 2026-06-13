@@ -162,21 +162,35 @@ class RAGHooks:
         return "\n".join(prompt_parts)
     
     def _trim_context(self, text: str) -> str:
-        """上下文裁剪控长"""
+        """上下文裁剪控长
+
+        相比旧实现的改进：
+        1. token 阈值提到 8192（旧值 4096 对 Qwen2.5 系列过于保守，模型本身支持 32K）
+        2. 中文场景按 2 字符 ≈ 1 token 估算（旧值 4 偏宽松，可能导致实际 token 数超限）
+        3. 优先按段落（``\\n\\n``）边界截断，避免砍在半句话/半个词中间
+        """
         # 第一步：清洗文本
         text = self._clean_text(text)
-        
-        # 第二步：检查Token数量并截断
-        max_tokens = 4096  # 模型上下文限制
-        estimated_tokens = len(text) // 4  # 粗略估算（中文约4字符=1token）
-        
-        if estimated_tokens > max_tokens:
-            # 从尾部截断
-            max_chars = max_tokens * 4
-            text = text[:max_chars]
-            logger.warning(f"[before-model] 上下文超出限制，已截断至 {max_chars} 字符")
-        
-        return text
+
+        # 第二步：检查 token 数量
+        max_tokens = 8192       # 模型上下文上限（保守留出系统提示与回复空间）
+        char_per_token = 2      # 中文场景下更贴近真实的估算
+        max_chars = max_tokens * char_per_token
+
+        if len(text) <= max_chars:
+            return text
+
+        # 第三步：硬截断到 max_chars，再尝试退到最近的段落边界
+        truncated = text[:max_chars]
+        last_para = truncated.rfind("\n\n")
+        # 段落边界不能离起点太近（否则丢的内容过多），至少保留 70%
+        if last_para > max_chars * 0.7:
+            truncated = truncated[:last_para]
+
+        logger.warning(
+            f"[before-model] 上下文超限（原 {len(text)} 字符），已截断至 {len(truncated)} 字符"
+        )
+        return truncated
     
     def _clean_text(self, text: str) -> str:
         """清洗文本"""
