@@ -2,6 +2,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
+from urllib.parse import quote_plus
 from app.config import settings
 from app.utils.logger import logger
 
@@ -28,7 +29,13 @@ class MySQLClient:
     
     def _connect(self):
         try:
-            url = f"mysql+pymysql://{settings.MYSQL_USER}:{settings.MYSQL_PASSWORD}@{settings.MYSQL_HOST}:{settings.MYSQL_PORT}/{settings.MYSQL_DATABASE}"
+            # 密码可能含 @ : / 等特殊字符，必须 URL 编码，否则 SQLAlchemy 解析连接串会出错
+            user = quote_plus(settings.MYSQL_USER)
+            password = quote_plus(settings.MYSQL_PASSWORD)
+            url = (
+                f"mysql+pymysql://{user}:{password}"
+                f"@{settings.MYSQL_HOST}:{settings.MYSQL_PORT}/{settings.MYSQL_DATABASE}"
+            )
             self.engine = create_engine(url, echo=False)
             Base.metadata.create_all(self.engine)
             self.Session = sessionmaker(bind=self.engine)
