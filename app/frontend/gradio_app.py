@@ -201,11 +201,14 @@ def upload_file(file, token):
         headers = {}
         if token:
             headers["token"] = token
-        
+
+        # 取原始文件名（保留扩展名，后端 document_processor 据此选解析器）
+        # Gradio 4.x 的 file 对象没有 .type 属性，所以这里不传 mime
+        filename = os.path.basename(file.name)
         with open(file.name, 'rb') as f:
             response = requests.post(
                 f"{API_URL}/upload",
-                files={"file": ("uploaded_file", f, file.type)},
+                files={"file": (filename, f)},
                 headers=headers
             )
         response.raise_for_status()
