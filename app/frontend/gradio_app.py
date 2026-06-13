@@ -201,11 +201,14 @@ def upload_file(file, token):
         headers = {}
         if token:
             headers["token"] = token
-        
+
+        # 取原始文件名（保留扩展名，后端 document_processor 据此选解析器）
+        # Gradio 4.x 的 file 对象没有 .type 属性，所以这里不传 mime
+        filename = os.path.basename(file.name)
         with open(file.name, 'rb') as f:
             response = requests.post(
                 f"{API_URL}/upload",
-                files={"file": ("uploaded_file", f, file.type)},
+                files={"file": (filename, f)},
                 headers=headers
             )
         response.raise_for_status()
@@ -218,15 +221,16 @@ def upload_file(file, token):
     except Exception as e:
         return f"❌ 上传失败: {str(e)}"
 
-def get_stats():
-    """获取统计"""
+def get_stats(token=""):
+    """获取当前用户的文档统计"""
     try:
-        response = requests.get(f"{API_URL}/stats")
+        headers = {"token": token} if token else {}
+        response = requests.get(f"{API_URL}/stats", headers=headers)
         response.raise_for_status()
         result = response.json()
-        
+
         if result['code'] == 200:
-            return f"知识库文档数量: {result['data']['document_count']}"
+            return f"我的知识库文档数量: {result['data']['document_count']}"
         else:
             return "获取统计失败"
     except Exception as e:
@@ -322,7 +326,7 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
                     refresh_btn = gr.Button("刷新统计", size="sm")
                     new_session_btn = gr.Button("新建会话", size="sm")
                 
-                refresh_btn.click(get_stats, outputs=stats_display)
+                refresh_btn.click(get_stats, inputs=[token_state], outputs=stats_display)
                 new_session_btn.click(
                     create_new_session,
                     inputs=[token_state],
