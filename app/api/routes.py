@@ -189,7 +189,7 @@ async def query(request: QueryRequest, token: Optional[str] = Header(None)):
             user_id = "anonymous"
         
         # ==================== 检索相关文档 ====================
-        retrieved_docs = retrieval_engine.hybrid_search(request.query)
+        retrieved_docs = retrieval_engine.hybrid_search(request.query, user_id=user_id)
         retrieved_docs = [doc for doc in retrieved_docs if doc.get('document')]
         
         if not retrieved_docs:
@@ -301,18 +301,38 @@ async def query(request: QueryRequest, token: Optional[str] = Header(None)):
 # ==================== 文件上传接口 ====================
 
 @router.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), token: Optional[str] = Header(None)):
     request_id = str(uuid4())
-    
+
+    # ===== 鉴权：必须登录才能上传 =====
+    if not token:
+        return {
+            'code': 401,
+            'message': '请先登录后再上传文档',
+            'data': {},
+            'request_id': request_id
+        }
+    auth = user_service.verify_token(token)
+    if not auth["valid"]:
+        return {
+            'code': 401,
+            'message': auth["message"],
+            'data': {},
+            'request_id': request_id
+        }
+    user_id = auth["user_id"]
+
     try:
-        os.makedirs('uploads', exist_ok=True)
-        file_path = f"uploads/{file.filename}"
-        
+        # 文件存到 uploads/<user_id>/，多用户同名不会互相覆盖
+        user_dir = f"uploads/{user_id}"
+        os.makedirs(user_dir, exist_ok=True)
+        file_path = f"{user_dir}/{file.filename}"
+
         with open(file_path, 'wb') as f:
             f.write(await file.read())
-        
+
         content = document_processor.extract_text(file_path)
-        
+
         if not content:
             return {
                 'code': 5003,
@@ -320,9 +340,9 @@ async def upload_file(file: UploadFile = File(...)):
                 'data': {},
                 'request_id': request_id
             }
-        
+
         chunks = document_processor.semantic_chunking(content)
-        
+
         if not chunks:
             return {
                 'code': 5003,
@@ -330,16 +350,16 @@ async def upload_file(file: UploadFile = File(...)):
                 'data': {},
                 'request_id': request_id
             }
-        
+
         embeddings = embedding_service.get_batch_embeddings(chunks)
-        
+
         valid_chunks = []
         valid_embeddings = []
         for chunk, embedding in zip(chunks, embeddings):
             if embedding:
                 valid_chunks.append(chunk)
                 valid_embeddings.append(embedding)
-        
+
         if not valid_chunks:
             return {
                 'code': 5001,
@@ -347,10 +367,15 @@ async def upload_file(file: UploadFile = File(...)):
                 'data': {},
                 'request_id': request_id
             }
-        
-        ids = [f"doc_{uuid4().hex[:8]}_{i}" for i in range(len(valid_chunks))]
-        metadatas = [{'filename': file.filename, 'chunk_index': i} for i in range(len(valid_chunks))]
-        
+
+        ids = [f"doc_{user_id[:8]}_{uuid4().hex[:8]}_{i}" for i in range(len(valid_chunks))]
+        # metadata 加 user_id，检索时按 user_id 过滤实现私有
+        metadatas = [{
+            'filename': file.filename,
+            'chunk_index': i,
+            'user_id': user_id,
+        } for i in range(len(valid_chunks))]
+
         success = chroma_service.add_documents(valid_chunks, valid_embeddings, metadatas, ids)
         
         if success:
@@ -420,7 +445,7 @@ async def batch_query(request: BatchQueryRequest, token: Optional[str] = Header(
         import concurrent.futures
         
         def retrieve_sync(query):
-            return retrieval_engine.hybrid_search(query)
+            return retrieval_engine.hybrid_search(query, user_id=user_id)
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             loop = asyncio.get_event_loop()
@@ -559,9 +584,15 @@ async def batch_query(request: BatchQueryRequest, token: Optional[str] = Header(
 # ==================== 统计接口 ====================
 
 @router.get("/stats")
-async def get_stats():
+async def get_stats(token: Optional[str] = Header(None)):
     try:
-        doc_count = chroma_service.count()
+        # 登录用户：只统计自己的文档；未登录：返回 0（不暴露全局总数）
+        user_id = None
+        if token:
+            auth = user_service.verify_token(token)
+            if auth["valid"]:
+                user_id = auth["user_id"]
+        doc_count = chroma_service.count(user_id=user_id)
         return {
             'code': 200,
             'message': 'success',
@@ -582,22 +613,40 @@ async def get_stats():
 # ==================== 清空接口 ====================
 
 @router.delete("/clear")
-async def clear_database():
+async def clear_database(token: Optional[str] = Header(None)):
+    """清空当前登录用户的所有文档（仅自己的，不影响其他用户）"""
+    request_id = str(uuid4())
+    if not token:
+        return {
+            'code': 401,
+            'message': '请先登录',
+            'data': {},
+            'request_id': request_id
+        }
+    auth = user_service.verify_token(token)
+    if not auth["valid"]:
+        return {
+            'code': 401,
+            'message': auth["message"],
+            'data': {},
+            'request_id': request_id
+        }
+    user_id = auth["user_id"]
     try:
-        success = chroma_service.clear_collection()
+        success = chroma_service.delete_by_user(user_id)
         if success:
             return {
                 'code': 200,
                 'message': 'success',
                 'data': {},
-                'request_id': str(uuid4())
+                'request_id': request_id
             }
         else:
             return {
                 'code': 5002,
                 'message': '数据库连接异常',
                 'data': {},
-                'request_id': str(uuid4())
+                'request_id': request_id
             }
     except Exception as e:
         logger.error(f"清空失败: {str(e)}")
@@ -605,7 +654,7 @@ async def clear_database():
             'code': 500,
             'message': '服务内部异常',
             'data': {},
-            'request_id': str(uuid4())
+            'request_id': request_id
         }
 
 # ==================== 会话管理接口 ====================

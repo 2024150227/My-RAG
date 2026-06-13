@@ -33,12 +33,14 @@ class RetrievalEngine:
         
         return score / len(query_terms)
     
-    def hybrid_search(self, query: str) -> list:
+    def hybrid_search(self, query: str, user_id: str = None) -> list:
         query_embedding = embedding_service.get_embedding(query)
         if not query_embedding:
             return []
-        
-        vector_results = chroma_service.query(query_embedding, n_results=self.top_k * 2)
+
+        # user_id 不为空时按用户过滤；为空时不过滤（兼容老调用 / 系统级查询）
+        where = {"user_id": user_id} if user_id else None
+        vector_results = chroma_service.query(query_embedding, n_results=self.top_k * 2, where=where)
         
         if not vector_results:
             return []

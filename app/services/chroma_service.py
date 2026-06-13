@@ -43,14 +43,17 @@ class ChromaService:
             logger.error(f"ChromaDB添加文档失败: {str(e)}")
             return False
     
-    def query(self, query_embedding: list, n_results: int = 3):
+    def query(self, query_embedding: list, n_results: int = 3, where: dict = None):
         if not self.client:
             return []
         try:
-            results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n_results
-            )
+            kwargs = {
+                "query_embeddings": [query_embedding],
+                "n_results": n_results,
+            }
+            if where:
+                kwargs["where"] = where
+            results = self.collection.query(**kwargs)
             return [{
                 'document': doc,
                 'metadata': meta,
@@ -63,16 +66,32 @@ class ChromaService:
         except Exception as e:
             logger.error(f"ChromaDB查询失败: {str(e)}")
             return []
-    
-    def count(self) -> int:
+
+    def count(self, user_id: str = None) -> int:
         if not self.client:
             return 0
         try:
+            if user_id:
+                # 按 user_id 过滤计数
+                results = self.collection.get(where={"user_id": user_id})
+                return len(results.get("ids", []))
             return self.collection.count()
         except Exception as e:
             logger.error(f"ChromaDB计数失败: {str(e)}")
             return 0
-    
+
+    def delete_by_user(self, user_id: str) -> bool:
+        """删除指定用户的所有文档"""
+        if not self.client:
+            return False
+        try:
+            self.collection.delete(where={"user_id": user_id})
+            logger.info(f"已删除用户 {user_id} 的所有文档")
+            return True
+        except Exception as e:
+            logger.error(f"ChromaDB按用户删除失败: {str(e)}")
+            return False
+
     def clear_collection(self):
         if not self.client:
             return False
