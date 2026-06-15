@@ -378,7 +378,36 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
     
     with gr.Tab("🔐 用户认证"):
         gr.Markdown("### 用户登录/注册")
-        
+
+        # 用一段 CSS 关闭浏览器的 autocomplete / autofill，
+        # 避免 Chrome / Edge 把旧密码默认填进注册框。
+        # 注：Gradio 没有暴露 autocomplete 属性，必须靠 JS 注入到 input。
+        gr.HTML("""
+        <script>
+          // 进入页面后，把所有 type=password 的 input 关闭浏览器自动填充
+          (function () {
+            function disableAutofill() {
+              document.querySelectorAll('input[type="password"]').forEach(function (el) {
+                el.setAttribute('autocomplete', 'new-password');
+                el.setAttribute('data-lpignore', 'true');     // LastPass
+                el.setAttribute('data-1p-ignore', 'true');    // 1Password
+                el.value = '';
+              });
+              document.querySelectorAll('input[type="text"]').forEach(function (el) {
+                if (el.getAttribute('autocomplete') === null) {
+                  el.setAttribute('autocomplete', 'off');
+                }
+              });
+            }
+            // 初次执行
+            disableAutofill();
+            // Gradio 是 SPA，组件可能延迟挂载，再多扫几遍
+            setTimeout(disableAutofill, 500);
+            setTimeout(disableAutofill, 2000);
+          })();
+        </script>
+        """)
+
         with gr.Row():
             with gr.Column(scale=1):
                 gr.Markdown("**注册新用户**")
