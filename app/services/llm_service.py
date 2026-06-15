@@ -1,4 +1,6 @@
+import json
 import requests
+from typing import Iterator
 from app.config import settings
 from app.utils.logger import logger
 
@@ -103,6 +105,98 @@ class LLMService:
         except (KeyError, IndexError, ValueError) as e:
             logger.error(f"LLM返回解析失败(siliconflow): {str(e)}")
             return "抱歉，未能生成回答"
+
+    # ==================== 流式生成 ====================
+
+    def generate_stream(self, prompt: str, context: str = "") -> Iterator[str]:
+        """流式生成回答，逐 token 返回字符串增量。
+
+        - ollama  : POST /api/generate stream=True，返回逐行 JSON
+        - siliconflow : POST /v1/chat/completions stream=True，返回 SSE 'data: {...}'
+        """
+        full_prompt = _build_prompt(prompt, context)
+        if self.provider == "siliconflow":
+            yield from self._stream_siliconflow(full_prompt)
+        else:
+            yield from self._stream_ollama(full_prompt)
+
+    # ----------------------- Ollama 流式 -----------------------
+    def _stream_ollama(self, full_prompt: str) -> Iterator[str]:
+        data = {
+            "model": self.ollama_model,
+            "prompt": full_prompt,
+            "stream": True,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": self.max_tokens,
+            },
+        }
+        try:
+            with requests.post(
+                f"{self.ollama_base_url}/api/generate",
+                headers={"Content-Type": "application/json"},
+                json=data,
+                stream=True,
+                timeout=120,
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    token = chunk.get("response", "")
+                    if token:
+                        yield token
+                    if chunk.get("done"):
+                        break
+        except requests.exceptions.RequestException as e:
+            logger.error(f"LLM 流式调用失败(ollama): {str(e)}")
+            yield f"\n[流式调用失败: {str(e)}]"
+
+    # --------------------- SiliconFlow 流式 ---------------------
+    def _stream_siliconflow(self, full_prompt: str) -> Iterator[str]:
+        if not self.sf_api_key:
+            yield "[流式调用失败: SILICONFLOW_API_KEY 未配置]"
+            return
+
+        data = {
+            "model": self.sf_model,
+            "messages": [{"role": "user", "content": full_prompt}],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": True,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.sf_api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            with requests.post(self.sf_url, headers=headers, json=data, stream=True, timeout=120) as resp:
+                resp.raise_for_status()
+                for raw in resp.iter_lines(decode_unicode=True):
+                    if not raw:
+                        continue
+                    if not raw.startswith("data:"):
+                        continue
+                    payload = raw[5:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    try:
+                        delta = chunk["choices"][0]["delta"].get("content", "")
+                    except (KeyError, IndexError):
+                        delta = ""
+                    if delta:
+                        yield delta
+        except requests.exceptions.RequestException as e:
+            logger.error(f"LLM 流式调用失败(siliconflow): {str(e)}")
+            yield f"\n[流式调用失败: {str(e)}]"
 
 
 llm_service = LLMService()
