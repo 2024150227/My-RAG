@@ -1,8 +1,10 @@
 from fastapi import APIRouter, File, UploadFile, HTTPException, Header
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from uuid import uuid4
 from typing import Optional, List
 import asyncio
+import json
 import time
 from app.services.document_processor import document_processor
 from app.services.embedding_service import embedding_service
@@ -297,6 +299,134 @@ async def query(request: QueryRequest, token: Optional[str] = Header(None)):
             'data': {},
             'request_id': request_id
         }
+
+
+# ==================== 流式查询接口（SSE） ====================
+
+@router.post("/query/stream")
+async def query_stream(request: QueryRequest, token: Optional[str] = Header(None)):
+    """流式查询接口（Server-Sent Events）
+
+    与 /query 共用前置检索、Hooks、敏感词过滤；仅 LLM 生成阶段改为流式输出，
+    答案逐 token 推给前端。流结束后再调用 after-model / after-agent 钩子写历史。
+
+    SSE 帧格式：
+        data: {"type": "meta", "session_id": "...", "context": [...]}\\n\\n
+        data: {"type": "token", "content": "你"}\\n\\n
+        data: {"type": "token", "content": "好"}\\n\\n
+        ...
+        data: {"type": "done", "execution_time": 1.23, "hooks_timing": {...}}\\n\\n
+    """
+    request_id = str(uuid4())
+
+    # ---------- 预处理：鉴权 + 检索 + before_model（同步部分） ----------
+    try:
+        if token:
+            before_agent_result = rag_hooks.before_agent(token)
+            if not before_agent_result["success"]:
+                return _sse_error_response(401, before_agent_result["message"], request_id)
+            session_id = before_agent_result["session_id"]
+            user_id = before_agent_result["user_id"]
+        else:
+            session_id = request.session_id or str(uuid4())
+            user_id = "anonymous"
+
+        retrieved_docs = retrieval_engine.hybrid_search(request.query, user_id=user_id)
+        retrieved_docs = [doc for doc in retrieved_docs if doc.get('document')]
+
+        if not retrieved_docs:
+            return _sse_error_response(404, '知识库内容未检索到相关信息', request_id, session_id=session_id)
+
+        context = "\n\n".join([doc['document'] for doc in retrieved_docs])
+
+        before_model_result = rag_hooks.before_model(session_id, request.query, context)
+        if before_model_result["is_blocked"]:
+            return _sse_error_response(403, before_model_result["block_reason"], request_id, session_id=session_id)
+
+        final_prompt = before_model_result["final_prompt"]
+    except Exception as e:
+        logger.error(f"流式查询预处理失败: {str(e)}", extra={'request_id': request_id})
+        return _sse_error_response(500, '服务内部异常', request_id)
+
+    # ---------- 生成器：调 LLM 流 + 收尾钩子 ----------
+    async def event_generator():
+        start_time = time.time()
+        try:
+            # 1. 先发一个 meta 帧，告诉前端 session_id 和 context
+            meta = {
+                "type": "meta",
+                "session_id": session_id,
+                "user_id": user_id,
+                "context": retrieved_docs,
+                "request_id": request_id,
+            }
+            yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
+
+            # 2. 流式调 LLM，每个 token 发一帧
+            answer_chunks = []
+            for token_text in llm_service.generate_stream(request.query, final_prompt):
+                answer_chunks.append(token_text)
+                frame = {"type": "token", "content": token_text}
+                yield f"data: {json.dumps(frame, ensure_ascii=False)}\n\n"
+                # 让出事件循环，避免长时间占用
+                await asyncio.sleep(0)
+
+            answer = "".join(answer_chunks).strip()
+
+            # 3. after-model 钩子（敏感词过滤、二次格式修正）
+            after_model_result = rag_hooks.after_model(session_id, answer)
+            processed_answer = after_model_result["processed_output"]
+
+            # 4. 如果 after-model 修改了内容，发一帧"修正"通知前端
+            if processed_answer != answer:
+                fix_frame = {"type": "fixed", "content": processed_answer}
+                yield f"data: {json.dumps(fix_frame, ensure_ascii=False)}\n\n"
+
+            # 5. after-agent 钩子：历史落库、性能统计
+            after_agent_result = await rag_hooks.after_agent(
+                session_id, request.query, processed_answer, context
+            )
+
+            # 6. 收尾帧
+            done_frame = {
+                "type": "done",
+                "execution_time": after_agent_result.get("total_time", time.time() - start_time),
+                "hooks_timing": after_agent_result.get("hooks_timing", {}),
+                "llm_stats": {
+                    "token_count": len(answer_chunks),
+                    "stream": True,
+                },
+            }
+            yield f"data: {json.dumps(done_frame, ensure_ascii=False)}\n\n"
+
+        except Exception as e:
+            logger.error(f"流式生成异常: {str(e)}", extra={'request_id': request_id})
+            err_frame = {"type": "error", "message": f"流式生成异常: {str(e)}"}
+            yield f"data: {json.dumps(err_frame, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # 关 Nginx 缓冲，确保实时
+        },
+    )
+
+
+def _sse_error_response(code: int, message: str, request_id: str, session_id: str = "") -> StreamingResponse:
+    """流式接口的错误响应：仍以 SSE 帧返回，方便前端统一处理"""
+    async def gen():
+        frame = {
+            "type": "error",
+            "code": code,
+            "message": message,
+            "session_id": session_id,
+            "request_id": request_id,
+        }
+        yield f"data: {json.dumps(frame, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 # ==================== 文件上传接口 ====================
 

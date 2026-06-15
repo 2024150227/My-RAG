@@ -1,6 +1,7 @@
 # Gradio 应用 - 集成Hooks功能
 import gradio as gr
 import requests
+import json
 import os
 import sys
 
@@ -77,7 +78,7 @@ def query_api(query, session_id, token):
         headers = {}
         if token:
             headers["token"] = token
-        
+
         response = requests.post(
             f"{API_URL}/query",
             json={
@@ -88,34 +89,34 @@ def query_api(query, session_id, token):
         )
         response.raise_for_status()
         result = response.json()
-        
+
         if result['code'] == 200:
             answer = result['data']['answer']
             context = result['data']['context']
             session_id = result['data']['session_id']
             execution_time = result.get('execution_time', 0)
             hooks_timing = result.get('hooks_timing', {})
-            
+
             # 格式化上下文
             context_str = ""
             for i, ctx in enumerate(context, 1):
                 context_str += f"**文档 {i}** (相关性: {ctx['relevance_score']:.4f})\n"
                 context_str += ctx['document']
                 context_str += "\n\n"
-            
+
             # 格式化链路耗时
             timing_str = f"**总耗时**: {execution_time:.3f}秒\n\n"
             timing_str += "**各阶段耗时**:\n"
             for hook_name, hook_time in hooks_timing.items():
                 timing_str += f"- {hook_name}: {hook_time:.3f}秒\n"
-            
+
             # 格式化LLM统计信息
             llm_stats = result.get('llm_stats', {})
             llm_str = f"**输出Token数**: {llm_stats.get('token_count', 0)}\n"
             llm_str += f"**缓存命中**: {'✅ 是' if llm_stats.get('cache_hit') else '❌ 否'}\n"
             llm_str += f"**重试次数**: {llm_stats.get('retry_count', 0)}\n"
             llm_str += f"**熔断触发**: {'⚠️ 是' if llm_stats.get('is_circuit_broken') else '❌ 否'}\n"
-            
+
             return answer, context_str, session_id, timing_str, llm_str, query
         elif result['code'] == 401:
             return "⚠️ 请先登录后再进行查询", "", session_id, "", "", ""
@@ -125,6 +126,102 @@ def query_api(query, session_id, token):
             return result['message'], "", session_id, "", "", ""
     except Exception as e:
         return f"❌ API调用失败: {str(e)}", "", session_id, "", "", ""
+
+
+def query_api_stream(query, session_id, token):
+    """流式查询 API：generator，逐 token yield 部分结果。
+
+    每次 yield 5 元组（answer/context/session_id/timing/llm_str），让 Gradio 实时
+    更新对应输出框。第一次 yield 给一个空答案表示"开始"，后续逐渐填充。
+    """
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["token"] = token
+
+    payload = {"query": query, "session_id": session_id}
+
+    answer = ""
+    context_str = ""
+    timing_str = "⏳ 生成中..."
+    llm_str = ""
+
+    # 先 yield 一次"开始"状态，让用户看到反馈
+    yield answer, context_str, session_id, timing_str, llm_str
+
+    try:
+        with requests.post(
+            f"{API_URL}/query/stream",
+            json=payload,
+            headers=headers,
+            stream=True,
+            timeout=300,
+        ) as resp:
+            if resp.status_code != 200:
+                yield f"❌ HTTP {resp.status_code}", "", session_id, "", ""
+                return
+
+            for raw in resp.iter_lines(decode_unicode=True):
+                if not raw or not raw.startswith("data:"):
+                    continue
+                payload_str = raw[5:].strip()
+                if not payload_str:
+                    continue
+                try:
+                    frame = json.loads(payload_str)
+                except json.JSONDecodeError:
+                    continue
+
+                ftype = frame.get("type")
+
+                if ftype == "meta":
+                    # 上下文 + session_id 一次性渲染
+                    session_id = frame.get("session_id", session_id)
+                    context = frame.get("context", [])
+                    context_str = ""
+                    for i, ctx in enumerate(context, 1):
+                        context_str += f"**文档 {i}** (相关性: {ctx.get('relevance_score', 0):.4f})\n"
+                        context_str += ctx.get('document', '')
+                        context_str += "\n\n"
+                    yield answer, context_str, session_id, timing_str, llm_str
+
+                elif ftype == "token":
+                    answer += frame.get("content", "")
+                    yield answer, context_str, session_id, timing_str, llm_str
+
+                elif ftype == "fixed":
+                    # after-model 钩子修改了答案（例如敏感词过滤）
+                    answer = frame.get("content", answer)
+                    yield answer, context_str, session_id, timing_str, llm_str
+
+                elif ftype == "done":
+                    exec_t = frame.get("execution_time", 0)
+                    hooks_timing = frame.get("hooks_timing", {})
+                    timing_str = f"**总耗时**: {exec_t:.3f}秒\n\n**各阶段耗时**:\n"
+                    for k, v in hooks_timing.items():
+                        timing_str += f"- {k}: {v:.3f}秒\n"
+
+                    stats = frame.get("llm_stats", {})
+                    llm_str = (
+                        f"**输出 token 数**: {stats.get('token_count', 0)}\n"
+                        f"**流式输出**: ✅\n"
+                    )
+                    yield answer, context_str, session_id, timing_str, llm_str
+
+                elif ftype == "error":
+                    msg = frame.get("message", "未知错误")
+                    code = frame.get("code", 500)
+                    if code == 401:
+                        yield "⚠️ 请先登录后再进行查询", "", session_id, "", ""
+                    elif code == 403:
+                        yield f"⚠️ {msg}", "", session_id, "", ""
+                    elif code == 404:
+                        yield "未找到相关信息", "", session_id, "", ""
+                    else:
+                        yield f"❌ {msg}", "", session_id, "", ""
+                    return
+
+    except Exception as e:
+        yield f"❌ API调用失败: {str(e)}", context_str, session_id, "", ""
 
 # ==================== 会话历史浏览函数 ====================
 
@@ -383,9 +480,9 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
                 gr.Markdown("### 📊 LLM统计")
                 llm_output = gr.Textbox(label="LLM信息", lines=6, interactive=False)
         
-        # 提交查询
+        # 提交查询（流式）
         submit_btn.click(
-            query_api,
+            query_api_stream,
             inputs=[query_input, session_id, token_state],
             outputs=[answer_output, context_output, session_display, timing_output, llm_output]
         ).then(
@@ -399,9 +496,9 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
             inputs=[chat_history],
             outputs=[current_message_index]
         )
-        
+
         query_input.submit(
-            query_api,
+            query_api_stream,
             inputs=[query_input, session_id, token_state],
             outputs=[answer_output, context_output, session_display, timing_output, llm_output]
         ).then(
