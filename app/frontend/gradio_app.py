@@ -5,6 +5,16 @@ import json
 import os
 import sys
 
+# Gradio 启动时会用 httpx 访问 127.0.0.1 自检；如果系统设了 HTTP_PROXY/HTTPS_PROXY
+# 又把本机也走代理，就会 [WinError 10061] 目标计算机积极拒绝。
+# 这里把本机加进 NO_PROXY，确保启动自检与本地 API 调用都不走代理。
+_no_proxy = os.environ.get("NO_PROXY", "")
+for host in ("127.0.0.1", "localhost", "0.0.0.0"):
+    if host not in _no_proxy:
+        _no_proxy = (_no_proxy + "," + host).strip(",")
+os.environ["NO_PROXY"] = _no_proxy
+os.environ["no_proxy"] = _no_proxy
+
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
