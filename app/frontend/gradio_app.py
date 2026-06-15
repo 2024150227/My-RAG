@@ -153,7 +153,7 @@ def query_api_stream(query, session_id, token):
     answer = ""
     context_str = ""
     timing_str = "⏳ 生成中..."
-    llm_str = ""
+    llm_str = "⏳ 正在生成中... (流式输出已启用)"
 
     # 先 yield 一次"开始"状态，让用户看到反馈
     yield answer, context_str, session_id, timing_str, llm_str
@@ -303,30 +303,89 @@ def show_next_message(history, current_index):
 # ==================== 其他函数 ====================
 
 def upload_file(file, token):
-    """上传文件"""
-    try:
-        headers = {}
-        if token:
-            headers["token"] = token
+    """上传文件（兼容老接口：直接上传，不做覆盖确认）"""
+    return _do_upload(file, token, force=False)
 
-        # 取原始文件名（保留扩展名，后端 document_processor 据此选解析器）
+
+def _do_upload(file, token, force=False):
+    """实际执行上传的内部函数"""
+    try:
+        if file is None:
+            return "⚠️ 请先选择要上传的文件"
+        headers = {"token": token} if token else {}
         # Gradio 4.x 的 file 对象没有 .type 属性，所以这里不传 mime
         filename = os.path.basename(file.name)
+        params = {"force": "true"} if force else None
         with open(file.name, 'rb') as f:
             response = requests.post(
                 f"{API_URL}/upload",
                 files={"file": (filename, f)},
-                headers=headers
+                headers=headers,
+                params=params,
             )
         response.raise_for_status()
         result = response.json()
-        
+
         if result['code'] == 200:
-            return f"✅ 上传成功！\n文件名: {result['data']['filename']}\n分块数量: {result['data']['chunks_count']}"
+            tag = "✅ 覆盖上传成功" if force else "✅ 上传成功"
+            return f"{tag}！\n文件名: {result['data']['filename']}\n分块数量: {result['data']['chunks_count']}"
         else:
             return f"❌ 上传失败: {result['message']}"
     except Exception as e:
         return f"❌ 上传失败: {str(e)}"
+
+
+def check_and_upload(file, token):
+    """新版上传：先调 /upload/check 看是否同名，若已存在则提示用户确认覆盖。
+
+    返回三个值，分别用于：
+        - upload_result    : 上传结果文本
+        - confirm_visible  : 覆盖确认按钮是否可见 (gr.update)
+        - pending_filename : State，记录待覆盖的文件名（供"确认覆盖"按钮使用）
+    """
+    if file is None:
+        return "⚠️ 请先选择要上传的文件", gr.update(visible=False), ""
+    if not token:
+        return "⚠️ 请先登录后再上传文档", gr.update(visible=False), ""
+
+    filename = os.path.basename(file.name)
+
+    try:
+        check_resp = requests.get(
+            f"{API_URL}/upload/check",
+            params={"filename": filename},
+            headers={"token": token},
+            timeout=10,
+        )
+        check_resp.raise_for_status()
+        check_result = check_resp.json()
+    except Exception as e:
+        return f"❌ 上传前检查失败: {str(e)}", gr.update(visible=False), ""
+
+    if check_result.get("code") != 200:
+        return f"❌ 检查失败: {check_result.get('message')}", gr.update(visible=False), ""
+
+    exists = check_result.get("data", {}).get("exists", False)
+    if exists:
+        # 文件已存在，显示确认按钮，等用户决定
+        msg = (
+            f"⚠️ 文档 \"{filename}\" 已经上传过了，是否覆盖？\n\n"
+            f"点击下方 \"✅ 确认覆盖\" 按钮继续，或取消后选择其他文件。"
+        )
+        return msg, gr.update(visible=True), filename
+
+    # 不存在，直接上传
+    return _do_upload(file, token, force=False), gr.update(visible=False), ""
+
+
+def confirm_overwrite_upload(file, token, pending_filename):
+    """用户点了"确认覆盖"按钮，强制以 force=true 重新上传。"""
+    if not pending_filename:
+        return "⚠️ 没有待覆盖的文件，请重新选择并点击上传", gr.update(visible=False), ""
+    if file is None:
+        return "⚠️ 文件已被清空，请重新选择", gr.update(visible=False), ""
+    result_text = _do_upload(file, token, force=True)
+    return result_text, gr.update(visible=False), ""
 
 def get_stats(token=""):
     """获取当前用户的文档统计"""
@@ -473,8 +532,24 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
                 gr.Markdown("### 📤 文档上传")
                 file_upload = gr.File(label="上传PDF/TXT/Excel文件")
                 upload_btn = gr.Button("上传到知识库")
-                upload_result = gr.Textbox(label="上传结果", interactive=False)
-                upload_btn.click(upload_file, inputs=[file_upload, token_state], outputs=upload_result)
+                upload_result = gr.Textbox(label="上传结果", interactive=False, lines=3)
+                # 待覆盖文件名（隐藏 State）；命中重名后由 confirm_btn 复用
+                pending_overwrite = gr.State("")
+                # 确认覆盖按钮，默认隐藏；命中重名时由 check_and_upload 切到可见
+                confirm_overwrite_btn = gr.Button(
+                    "✅ 确认覆盖", variant="stop", visible=False
+                )
+
+                upload_btn.click(
+                    check_and_upload,
+                    inputs=[file_upload, token_state],
+                    outputs=[upload_result, confirm_overwrite_btn, pending_overwrite],
+                )
+                confirm_overwrite_btn.click(
+                    confirm_overwrite_upload,
+                    inputs=[file_upload, token_state, pending_overwrite],
+                    outputs=[upload_result, confirm_overwrite_btn, pending_overwrite],
+                )
         
         gr.Markdown("---")
         

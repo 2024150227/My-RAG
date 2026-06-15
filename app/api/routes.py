@@ -430,8 +430,36 @@ def _sse_error_response(code: int, message: str, request_id: str, session_id: st
 
 # ==================== 文件上传接口 ====================
 
+@router.get("/upload/check")
+async def upload_check(filename: str, token: Optional[str] = Header(None)):
+    """上传前检查同名文件是否已存在（按当前用户隔离）。
+
+    前端建议在选中文件后先调一次本接口；若 exists=True，弹确认框
+    询问用户是否覆盖；用户确认后再调 POST /upload?force=true。
+    """
+    request_id = str(uuid4())
+    if not token:
+        return {'code': 401, 'message': '请先登录', 'data': {}, 'request_id': request_id}
+    auth = user_service.verify_token(token)
+    if not auth["valid"]:
+        return {'code': 401, 'message': auth["message"], 'data': {}, 'request_id': request_id}
+
+    user_id = auth["user_id"]
+    exists = chroma_service.exists_filename(user_id, filename)
+    return {
+        'code': 200,
+        'message': 'success',
+        'data': {'filename': filename, 'exists': exists},
+        'request_id': request_id,
+    }
+
+
 @router.post("/upload")
-async def upload_file(file: UploadFile = File(...), token: Optional[str] = Header(None)):
+async def upload_file(
+    file: UploadFile = File(...),
+    force: bool = False,
+    token: Optional[str] = Header(None),
+):
     request_id = str(uuid4())
 
     # ===== 鉴权：必须登录才能上传 =====
@@ -453,6 +481,19 @@ async def upload_file(file: UploadFile = File(...), token: Optional[str] = Heade
     user_id = auth["user_id"]
 
     try:
+        # 重名检测：默认拒绝；force=True 时先删旧再插新（覆盖语义）
+        already_exists = chroma_service.exists_filename(user_id, file.filename)
+        if already_exists and not force:
+            return {
+                'code': 4090,
+                'message': f'文档 "{file.filename}" 已存在，请确认是否覆盖',
+                'data': {'filename': file.filename, 'exists': True},
+                'request_id': request_id,
+            }
+        if already_exists and force:
+            removed = chroma_service.delete_by_filename(user_id, file.filename)
+            logger.info(f"覆盖上传：已删除旧文件 {file.filename} 的 {removed} 个 chunk")
+
         # 文件存到 uploads/<user_id>/，多用户同名不会互相覆盖
         user_dir = f"uploads/{user_id}"
         os.makedirs(user_dir, exist_ok=True)
