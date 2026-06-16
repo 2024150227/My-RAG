@@ -21,6 +21,7 @@
 
 ### 大语言模型
 - 🔀 **双 Provider 切换**：通过 `LLM_PROVIDER` 环境变量在本地 Ollama 与硅基流动云端 API 间无缝切换
+- 📡 **流式输出（SSE）**：`/query/stream` 接口逐 token 返回，前端 Gradio 像 ChatGPT 一样实时打字效果
 - 🎯 **链路 Hooks**：`before_retrieval` / `before_model` / `after_model` 三段切片，便于埋点 / 限流 / 内容审计
 - ⚡ **上下文裁剪**：超长 prompt 自动按段落边界回退到 token 上限内
 - 💬 **多轮对话**：基于 Redis 的会话上下文 + MySQL 持久化历史
@@ -28,6 +29,7 @@
 ### 工程与部署
 - 🔐 **账号体系**：注册 / 登录 / Token 校验 / 会话隔离
 - 🛡️ **Gradio basic auth**：前端可选启用账号密码保护，避免公网裸奔
+- 📂 **上传重名检测**：同名文档先弹窗让用户确认覆盖 or 取消，避免误操作
 - 🐳 **三种部署模式**：本地开发 / 全 Docker / 云服务器原生（含 1G 内存调优脚本）
 - 📊 **systemd 守护**：FastAPI / Gradio 自动拉起、journalctl 看日志
 
@@ -75,7 +77,8 @@ MY-RAG/
 │   └── README.md                  # 完整部署说明
 ├── scripts/
 │   ├── start_api.py               # 启动 FastAPI
-│   └── init_knowledge.py          # 批量入库脚本
+│   ├── init_knowledge.py          # 批量入库脚本
+│   └── debug_sse.py               # SSE 流式接口字节级调试工具
 ├── start.bat / stop.bat           # Windows 一键启停（仅本地开发）
 ├── docker-compose.yml             # 全容器开发模式
 └── requirements.txt
@@ -166,8 +169,9 @@ sudo -E bash deploy/install-app.sh                  # 部署应用 + systemd
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/upload` | 上传文档（按用户隔离） |
-| `POST` | `/query` | 单次问答 |
+| `POST` | `/upload` | 上传文档（按用户隔离，同名先返回 `409` 让前端确认覆盖） |
+| `POST` | `/query` | 单次问答（一次性返回完整答案） |
+| `POST` | `/query/stream` | **流式问答**（SSE，逐 token 推送，前端实时打字效果） |
 | `POST` | `/query/batch` | 批量问答 |
 | `GET` | `/stats` | 知识库统计 |
 | `DELETE` | `/clear` | 清空当前用户知识库 |
@@ -201,7 +205,24 @@ r = requests.post("http://localhost:8000/query",
                   json={"query": "DSW 计费方式是什么？", "top_k": 3},
                   headers={"token": token})
 print(r.json()["data"]["answer"])
+
+# 4. 流式问答（SSE）
+import json
+with requests.post("http://localhost:8000/query/stream",
+                   json={"query": "DSW 计费方式是什么？"},
+                   headers={"token": token},
+                   stream=True) as resp:
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data:"):
+            continue
+        frame = json.loads(line[5:])
+        if frame["type"] == "token":
+            print(frame["content"], end="", flush=True)
+        elif frame["type"] == "done":
+            break
 ```
+
+> 💡 SSE 帧类型：`meta`（检索上下文）→ `token`（逐 token 增量）→ `fixed`（after-model 修正）→ `done`（结尾统计）；错误用 `error` 帧返回。
 
 ---
 
@@ -269,6 +290,7 @@ curl -X POST http://localhost:8000/query \
 
 | 版本 | 主要变更 |
 | --- | --- |
+| **v1.2.1** | 新增 `/query/stream` 流式问答接口（SSE 逐 token 推送）；前端 Gradio 实时打字效果；上传重名检测与覆盖确认；敏感词过滤只查用户原始 query；修复 SSE 中文乱码（增量 UTF-8 解码 + charset 头）；Windows 启动加 `-X utf8` |
 | **v1.2.0** | README 全面更新；docs/部署文档完善 |
 | **v1.1.0** | 双 LLM Provider；Gradio basic auth；云服务器部署套件；多用户私有知识库；上下文裁剪优化；MySQL URL 编码 fix |
 | **v1.0.0** | 初版：FastAPI + Gradio + ChromaDB + 混合检索 + Ollama |
