@@ -66,7 +66,7 @@ if errorlevel 1 (
 echo   OK
 
 echo [4/5] Start FastAPI in new window ...
-start "MY-RAG API" cmd /k "chcp 65001 >nul && cd /d %~dp0 && venv\Scripts\python.exe scripts\start_api.py"
+start "MY-RAG API" cmd /k "chcp 65001 >nul && cd /d %~dp0 && venv\Scripts\python.exe -X utf8 scripts\start_api.py"
 
 set /a tries=0
 :wait_api
@@ -84,7 +84,7 @@ echo   OK
 
 :start_gradio
 echo [5/5] Start Gradio in new window ...
-start "MY-RAG Gradio" cmd /k "chcp 65001 >nul && cd /d %~dp0 && venv\Scripts\python.exe app\frontend\gradio_app.py"
+start "MY-RAG Gradio" cmd /k "chcp 65001 >nul && cd /d %~dp0 && venv\Scripts\python.exe -X utf8 app\frontend\gradio_app.py"
 
 echo.
 echo ========================================
