@@ -170,7 +170,34 @@ def query_api_stream(query, session_id, token):
                 yield f"❌ HTTP {resp.status_code}", "", session_id, "", ""
                 return
 
-            for raw in resp.iter_lines(decode_unicode=True):
+            # SSE 流是 UTF-8 字节流，但 requests.iter_lines(decode_unicode=True) 在
+            # Windows 上有两个坑：
+            #   1. SSE 响应头不带 charset → 回退到系统默认编码（cp936）解码
+            #   2. 即使强制 resp.encoding='utf-8'，它也是按 chunk 边界单独解码，
+            #      一个汉字 3 字节如果被切在两个 chunk 间就会出乱码方块
+            # 解决：拿原始字节流，自己用增量 UTF-8 解码器（incremental codec）拼接，
+            # 再按 \n 切行。这样无论字节怎么切都能正确还原中文。
+            import codecs
+            decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+            buffer = ''
+
+            def _iter_sse_lines():
+                nonlocal buffer
+                for chunk in resp.iter_content(chunk_size=1024):
+                    if not chunk:
+                        continue
+                    buffer += decoder.decode(chunk)
+                    while '\n' in buffer:
+                        line, buffer = buffer.split('\n', 1)
+                        yield line.rstrip('\r')
+                # 收尾 flush
+                tail = decoder.decode(b'', final=True)
+                if tail:
+                    buffer += tail
+                if buffer:
+                    yield buffer.rstrip('\r')
+
+            for raw in _iter_sse_lines():
                 if not raw or not raw.startswith("data:"):
                     continue
                 payload_str = raw[5:].strip()

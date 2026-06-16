@@ -1,8 +1,32 @@
+import codecs
 import json
 import requests
 from typing import Iterator
 from app.config import settings
 from app.utils.logger import logger
+
+
+def _iter_utf8_lines(resp, chunk_size: int = 1024) -> Iterator[str]:
+    """按 UTF-8 增量解码 + 按 \\n 拆行。
+
+    替代 ``resp.iter_lines(decode_unicode=True)``——后者按 chunk 边界单独解码，
+    一个汉字 3 字节如果被切在两个 chunk 间会出乱码。增量解码器会把残字节
+    缓存住，等下一个 chunk 拼齐再 emit，保证多字节字符不被切坏。
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    buffer = ""
+    for chunk in resp.iter_content(chunk_size=chunk_size):
+        if not chunk:
+            continue
+        buffer += decoder.decode(chunk)
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            yield line.rstrip("\r")
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        buffer += tail
+    if buffer:
+        yield buffer.rstrip("\r")
 
 SYSTEM_PROMPT = """
 你是专业的企业文档分析师，严格依据提供的文档内容进行回答、总结与润色。
@@ -140,7 +164,7 @@ class LLMService:
                 timeout=120,
             ) as resp:
                 resp.raise_for_status()
-                for line in resp.iter_lines(decode_unicode=True):
+                for line in _iter_utf8_lines(resp):
                     if not line:
                         continue
                     try:
@@ -176,7 +200,7 @@ class LLMService:
         try:
             with requests.post(self.sf_url, headers=headers, json=data, stream=True, timeout=120) as resp:
                 resp.raise_for_status()
-                for raw in resp.iter_lines(decode_unicode=True):
+                for raw in _iter_utf8_lines(resp):
                     if not raw:
                         continue
                     if not raw.startswith("data:"):

@@ -406,7 +406,7 @@ async def query_stream(request: QueryRequest, token: Optional[str] = Header(None
 
     return StreamingResponse(
         event_generator(),
-        media_type="text/event-stream",
+        media_type="text/event-stream; charset=utf-8",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",  # 关 Nginx 缓冲，确保实时
@@ -426,7 +426,7 @@ def _sse_error_response(code: int, message: str, request_id: str, session_id: st
         }
         yield f"data: {json.dumps(frame, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(gen(), media_type="text/event-stream; charset=utf-8")
 
 # ==================== 文件上传接口 ====================
 
