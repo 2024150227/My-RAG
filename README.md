@@ -14,7 +14,7 @@
 ## ✨ 功能特性
 
 ### 知识库与检索
-- 📄 **多格式文档**：Markdown / PDF / TXT / Excel
+- 📄 **多格式文档**：Markdown / PDF / Word(.docx) / TXT / Excel
 - ✂️ **语义分块**：基于 Markdown 标题结构的智能切分，块间动态重叠
 - 🔍 **混合检索**：向量检索（BGE-M3）+ BM25，结果走 BGE-Reranker-v2-m3 重排
 - 👤 **多用户隔离**：每个账号拥有独立的私有知识库（ChromaDB metadata 区分）
@@ -46,7 +46,7 @@
 | LLM | Ollama（本地 Qwen / DeepSeek 等） *或* SiliconFlow（Qwen2.5-7B-Instruct 等） |
 | 缓存 / 会话 | Redis 5.0 |
 | 账号 / 历史 | MySQL 8.0 + SQLAlchemy 2.0 |
-| 文档 | LangChain 0.1 + PyPDF + openpyxl |
+| 文档 | LangChain 0.1 + PyPDF + openpyxl + python-docx |
 
 ---
 

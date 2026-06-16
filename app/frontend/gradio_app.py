@@ -557,7 +557,10 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
             
             with gr.Column(scale=3):
                 gr.Markdown("### 📤 文档上传")
-                file_upload = gr.File(label="上传PDF/TXT/Excel文件")
+                file_upload = gr.File(
+                    label="上传文档（支持 PDF / Word(.docx) / Markdown / TXT / Excel）",
+                    file_types=[".pdf", ".docx", ".md", ".txt", ".xlsx", ".xls"],
+                )
                 upload_btn = gr.Button("上传到知识库")
                 upload_result = gr.Textbox(label="上传结果", interactive=False, lines=3)
                 # 待覆盖文件名（隐藏 State）；命中重名后由 confirm_btn 复用
