@@ -92,6 +92,38 @@ class ChromaService:
             logger.error(f"ChromaDB按用户删除失败: {str(e)}")
             return False
 
+    def exists_filename(self, user_id: str, filename: str) -> bool:
+        """检查指定用户的知识库中是否已存在同名文件"""
+        if not self.client:
+            return False
+        try:
+            res = self.collection.get(
+                where={"$and": [{"user_id": user_id}, {"filename": filename}]},
+                limit=1,
+            )
+            return bool(res.get("ids"))
+        except Exception as e:
+            logger.error(f"ChromaDB 查询同名文件失败: {str(e)}")
+            return False
+
+    def delete_by_filename(self, user_id: str, filename: str) -> int:
+        """删除指定用户名下指定文件名的所有 chunk，返回删除的 chunk 数。"""
+        if not self.client:
+            return 0
+        try:
+            res = self.collection.get(
+                where={"$and": [{"user_id": user_id}, {"filename": filename}]}
+            )
+            ids = res.get("ids", []) or []
+            if not ids:
+                return 0
+            self.collection.delete(ids=ids)
+            logger.info(f"已删除用户 {user_id} 文件 {filename} 的 {len(ids)} 个 chunk")
+            return len(ids)
+        except Exception as e:
+            logger.error(f"ChromaDB 按文件名删除失败: {str(e)}")
+            return 0
+
     def clear_collection(self):
         if not self.client:
             return False

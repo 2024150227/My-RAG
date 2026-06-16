@@ -101,16 +101,13 @@ class RAGHooks:
             }
         """
         start_time = time.time()
-        
+
         try:
-            # 1. 动态Prompt组装
-            history_str = memory_service.format_history_for_prompt(session_id)
-            final_prompt = self._assemble_prompt(history_str, retrieval_context, user_query)
-            
-            # 2. 敏感词拦截过滤
-            sensitive_result = sensitive_filter.filter_text(final_prompt)
+            # 1. 敏感词拦截过滤（仅检查用户原始 query，不查检索文档）
+            #    避免知识库里包含 "病毒/攻击" 等正常术语时整条请求被误拦
+            sensitive_result = sensitive_filter.filter_text(user_query)
             if sensitive_result["has_sensitive"]:
-                logger.warning(f"[before-model] 敏感词拦截: {sensitive_result['sensitive_words']}")
+                logger.warning(f"[before-model] 用户输入命中敏感词: {sensitive_result['sensitive_words']}")
                 return {
                     "success": False,
                     "message": "输入内容包含敏感词，已拦截",
@@ -118,7 +115,11 @@ class RAGHooks:
                     "is_blocked": True,
                     "block_reason": f"检测到敏感词: {', '.join(sensitive_result['sensitive_words'])}"
                 }
-            
+
+            # 2. 动态Prompt组装（在敏感词检查之后再拼接，节省一次正则扫描）
+            history_str = memory_service.format_history_for_prompt(session_id)
+            final_prompt = self._assemble_prompt(history_str, retrieval_context, user_query)
+
             # 3. 上下文裁剪控长
             final_prompt = self._trim_context(final_prompt)
             
@@ -378,30 +379,20 @@ class RAGHooks:
             }
         """
         start_time = time.time()
-        
+
         try:
             # 1. 输出格式修正
             processed_output = self._fix_output_format(model_output)
-            
-            # 2. 二次敏感词过滤
-            sensitive_result = sensitive_filter.filter_text(processed_output)
-            if sensitive_result["has_sensitive"]:
-                logger.warning(f"[after-model] 输出敏感词拦截: {sensitive_result['sensitive_words']}")
-                processed_output = sensitive_result["filtered_text"]
-                # 如果敏感词过多，直接拒绝
-                if len(sensitive_result["sensitive_words"]) > 3:
-                    return {
-                        "success": False,
-                        "message": "输出内容包含过多敏感词，已拦截",
-                        "processed_output": "抱歉，生成的回答包含不适当内容，请重新提问。",
-                        "is_blocked": True,
-                        "block_reason": f"检测到敏感词: {', '.join(sensitive_result['sensitive_words'])}"
-                    }
-            
+
+            # 注：不再对 LLM 输出做敏感词过滤——
+            # 输入侧已经在 before_model 阶段对 user_query 拦截了恶意请求；
+            # 输出侧再过滤会误伤包含技术术语（病毒/攻击/黑客等）的正常回答，
+            # 且流式场景下逐 token 过滤实现复杂、用户体验差。
+
             hook_time = time.time() - start_time
             if session_id in self.execution_stats:
                 self.execution_stats[session_id]["hooks_timing"]["after_model"] = hook_time
-            
+
             logger.info(f"[after-model] 输出后处理完成, 耗时: {hook_time:.3f}s")
             
             return {
