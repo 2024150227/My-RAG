@@ -141,7 +141,7 @@ def query_api(query, session_id, token):
 def query_api_stream(query, session_id, token):
     """流式查询 API：generator，逐 token yield 部分结果。
 
-    每次 yield 5 元组（answer/context/session_id/timing/llm_str），让 Gradio 实时
+    每次 yield 6 元组（answer/context/session_id/timing/llm_str/image_urls），让 Gradio 实时
     更新对应输出框。第一次 yield 给一个空答案表示"开始"，后续逐渐填充。
     """
     headers = {"Content-Type": "application/json"}
@@ -154,9 +154,10 @@ def query_api_stream(query, session_id, token):
     context_str = ""
     timing_str = "⏳ 生成中..."
     llm_str = "⏳ 正在生成中... (流式输出已启用)"
+    image_urls = []  # gr.Gallery 接受 url 列表
 
     # 先 yield 一次"开始"状态，让用户看到反馈
-    yield answer, context_str, session_id, timing_str, llm_str
+    yield answer, context_str, session_id, timing_str, llm_str, image_urls
 
     try:
         with requests.post(
@@ -167,7 +168,7 @@ def query_api_stream(query, session_id, token):
             timeout=300,
         ) as resp:
             if resp.status_code != 200:
-                yield f"❌ HTTP {resp.status_code}", "", session_id, "", ""
+                yield f"❌ HTTP {resp.status_code}", "", session_id, "", "", []
                 return
 
             # SSE 流是 UTF-8 字节流，但 requests.iter_lines(decode_unicode=True) 在
@@ -219,16 +220,27 @@ def query_api_stream(query, session_id, token):
                         context_str += f"**文档 {i}** (相关性: {ctx.get('relevance_score', 0):.4f})\n"
                         context_str += ctx.get('document', '')
                         context_str += "\n\n"
-                    yield answer, context_str, session_id, timing_str, llm_str
+                    # 图片：把后端返回的相对路径拼成带 token 的绝对 URL；
+                    # 后端路径形如 uploads/<user_id>/_images/.../xxx.png，
+                    # 静态路由是 /files/<user_id>/...，所以把 'uploads/' 前缀去掉
+                    raw_imgs = frame.get("images", []) or []
+                    image_urls = []
+                    for p in raw_imgs:
+                        rel = p[len("uploads/"):] if p.startswith("uploads/") else p
+                        url = f"{API_URL}/files/{rel}"
+                        if token:
+                            url += f"?token={token}"
+                        image_urls.append(url)
+                    yield answer, context_str, session_id, timing_str, llm_str, image_urls
 
                 elif ftype == "token":
                     answer += frame.get("content", "")
-                    yield answer, context_str, session_id, timing_str, llm_str
+                    yield answer, context_str, session_id, timing_str, llm_str, image_urls
 
                 elif ftype == "fixed":
                     # after-model 钩子修改了答案（例如敏感词过滤）
                     answer = frame.get("content", answer)
-                    yield answer, context_str, session_id, timing_str, llm_str
+                    yield answer, context_str, session_id, timing_str, llm_str, image_urls
 
                 elif ftype == "done":
                     exec_t = frame.get("execution_time", 0)
@@ -242,23 +254,23 @@ def query_api_stream(query, session_id, token):
                         f"**输出 token 数**: {stats.get('token_count', 0)}\n"
                         f"**流式输出**: ✅\n"
                     )
-                    yield answer, context_str, session_id, timing_str, llm_str
+                    yield answer, context_str, session_id, timing_str, llm_str, image_urls
 
                 elif ftype == "error":
                     msg = frame.get("message", "未知错误")
                     code = frame.get("code", 500)
                     if code == 401:
-                        yield "⚠️ 请先登录后再进行查询", "", session_id, "", ""
+                        yield "⚠️ 请先登录后再进行查询", "", session_id, "", "", []
                     elif code == 403:
-                        yield f"⚠️ {msg}", "", session_id, "", ""
+                        yield f"⚠️ {msg}", "", session_id, "", "", []
                     elif code == 404:
-                        yield "未找到相关信息", "", session_id, "", ""
+                        yield "未找到相关信息", "", session_id, "", "", []
                     else:
-                        yield f"❌ {msg}", "", session_id, "", ""
+                        yield f"❌ {msg}", "", session_id, "", "", []
                     return
 
     except Exception as e:
-        yield f"❌ API调用失败: {str(e)}", context_str, session_id, "", ""
+        yield f"❌ API调用失败: {str(e)}", context_str, session_id, "", "", image_urls
 
 # ==================== 会话历史浏览函数 ====================
 
@@ -557,7 +569,10 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
             
             with gr.Column(scale=3):
                 gr.Markdown("### 📤 文档上传")
-                file_upload = gr.File(label="上传PDF/TXT/Excel文件")
+                file_upload = gr.File(
+                    label="上传文档（支持 PDF / Word(.docx) / Markdown / TXT / Excel）",
+                    file_types=[".pdf", ".docx", ".md", ".txt", ".xlsx", ".xls"],
+                )
                 upload_btn = gr.Button("上传到知识库")
                 upload_result = gr.Textbox(label="上传结果", interactive=False, lines=3)
                 # 待覆盖文件名（隐藏 State）；命中重名后由 confirm_btn 复用
@@ -592,6 +607,14 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
             with gr.Column(scale=2):
                 gr.Markdown("### 📝 LLM回答")
                 answer_output = gr.Textbox(label="回答结果", lines=8, interactive=False)
+                gr.Markdown("### 📷 相关图片")
+                images_gallery = gr.Gallery(
+                    label="文档内嵌图片",
+                    columns=4,
+                    height=220,
+                    show_label=False,
+                    preview=True,
+                )
         
         gr.Markdown("---")
         
@@ -625,7 +648,7 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
         submit_btn.click(
             query_api_stream,
             inputs=[query_input, session_id, token_state],
-            outputs=[answer_output, context_output, session_display, timing_output, llm_output]
+            outputs=[answer_output, context_output, session_display, timing_output, llm_output, images_gallery]
         ).then(
             # 查询完成后刷新历史
             load_session_history,
@@ -641,7 +664,7 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
         query_input.submit(
             query_api_stream,
             inputs=[query_input, session_id, token_state],
-            outputs=[answer_output, context_output, session_display, timing_output, llm_output]
+            outputs=[answer_output, context_output, session_display, timing_output, llm_output, images_gallery]
         ).then(
             load_session_history,
             inputs=[session_id, token_state],

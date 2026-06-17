@@ -14,10 +14,11 @@
 ## ✨ 功能特性
 
 ### 知识库与检索
-- 📄 **多格式文档**：Markdown / PDF / TXT / Excel
+- 📄 **多格式文档**：Markdown / PDF / Word(.docx) / TXT / Excel
+- 🖼️ **图文混合检索**：上传 PDF/Word 时自动抽取内嵌图片（PyMuPDF + python-docx），按 md5 去重存盘；检索时随相关 chunk 一并返回，前端 Gradio 画廊实时渲染相关图片
 - ✂️ **语义分块**：基于 Markdown 标题结构的智能切分，块间动态重叠
 - 🔍 **混合检索**：向量检索（BGE-M3）+ BM25，结果走 BGE-Reranker-v2-m3 重排
-- 👤 **多用户隔离**：每个账号拥有独立的私有知识库（ChromaDB metadata 区分）
+- 👤 **多用户隔离**：每个账号拥有独立的私有知识库（ChromaDB metadata 区分），私有图片走 token 鉴权静态路由
 
 ### 大语言模型
 - 🔀 **双 Provider 切换**：通过 `LLM_PROVIDER` 环境变量在本地 Ollama 与硅基流动云端 API 间无缝切换
@@ -46,7 +47,7 @@
 | LLM | Ollama（本地 Qwen / DeepSeek 等） *或* SiliconFlow（Qwen2.5-7B-Instruct 等） |
 | 缓存 / 会话 | Redis 5.0 |
 | 账号 / 历史 | MySQL 8.0 + SQLAlchemy 2.0 |
-| 文档 | LangChain 0.1 + PyPDF + openpyxl |
+| 文档 | LangChain 0.1 + PyPDF + **PyMuPDF** + openpyxl + python-docx |
 
 ---
 
@@ -66,9 +67,9 @@ MY-RAG/
 │       ├── llm_service.py         # ★ 双 Provider 实现（ollama / siliconflow）
 │       ├── embedding_service.py   # 调硅基流动 embedding
 │       ├── rerank_service.py      # 调硅基流动 rerank
-│       ├── retrieval_engine.py    # 混合检索（向量 + BM25）
+│       ├── retrieval_engine.py    # 混合检索（向量 + BM25），透传 metadata
 │       ├── chroma_service.py      # ChromaDB 客户端
-│       ├── document_processor.py  # 文档分块（基于 Markdown 标题）
+│       ├── document_processor.py  # 文档分块 + 图片抽取（PyMuPDF / python-docx）
 │       ├── user_service.py        # 注册 / 登录 / token 管理
 │       └── hooks_manager.py       # 链路 hooks（性能埋点、上下文裁剪）
 ├── deploy/                        # 云服务器部署脚本（Ubuntu）
@@ -169,12 +170,13 @@ sudo -E bash deploy/install-app.sh                  # 部署应用 + systemd
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/upload` | 上传文档（按用户隔离，同名先返回 `409` 让前端确认覆盖） |
-| `POST` | `/query` | 单次问答（一次性返回完整答案） |
-| `POST` | `/query/stream` | **流式问答**（SSE，逐 token 推送，前端实时打字效果） |
+| `POST` | `/upload` | 上传文档（按用户隔离，同名先返回 `409` 让前端确认覆盖；自动抽取内嵌图片） |
+| `POST` | `/query` | 单次问答（一次性返回完整答案，含相关图片 URL） |
+| `POST` | `/query/stream` | **流式问答**（SSE，逐 token 推送，前端实时打字效果，meta 帧含图片 URL） |
 | `POST` | `/query/batch` | 批量问答 |
 | `GET` | `/stats` | 知识库统计 |
 | `DELETE` | `/clear` | 清空当前用户知识库 |
+| `GET` | `/files/{user_id}/{path}` | 私有图片下载（token 鉴权 + 防越权 + 防路径穿越） |
 
 ### 会话
 
@@ -222,7 +224,53 @@ with requests.post("http://localhost:8000/query/stream",
             break
 ```
 
-> 💡 SSE 帧类型：`meta`（检索上下文）→ `token`（逐 token 增量）→ `fixed`（after-model 修正）→ `done`（结尾统计）；错误用 `error` 帧返回。
+> 💡 SSE 帧类型：`meta`（检索上下文 + 图片 URL）→ `token`（逐 token 增量）→ `fixed`（after-model 修正）→ `done`（结尾统计）；错误用 `error` 帧返回。
+
+---
+
+## 🖼️ 图文混合检索
+
+PDF / Word 文档上传时，系统会自动抽取内嵌图片随相关 chunk 一起返回。
+
+### 链路
+
+```
+上传 PDF/Word
+   ↓
+PyMuPDF 抽 PDF 图 / python-docx 抽 Word 图
+   ↓
+md5 命名去重 + 过滤 < 2KB 的小图标
+   ↓
+存盘到 uploads/<user_id>/_images/<md5前12位>/
+   ↓
+图片相对路径以逗号串形式写进 ChromaDB chunk 的 metadata.images
+
+────────────────────（查询时）────────────────────
+
+hybrid_search 透传 metadata
+   ↓
+路由层 _collect_image_urls 跨 chunk 去重
+   ↓
+SSE meta 帧返回相对路径列表
+   ↓
+前端拼成 /files/<user_id>/...?token=xxx
+   ↓
+gr.Gallery 渲染（浏览器 <img> 通过 /files 路由拉图）
+   ↓
+后端三重校验：token 有效 + URL user_id 与 token user_id 匹配 + 路径白名单
+```
+
+### 关键设计取舍
+
+| 选择 | 原因 |
+| --- | --- |
+| 用 PyMuPDF 而非 pypdf 抽图 | pypdf 抽图 API 残废；PyMuPDF 是工业标准，按 xref 抽 |
+| md5 命名 + < 2KB 过滤 | 同图天然去重；过滤图标分隔线避免画廊污染 |
+| 图存盘 + metadata 存路径 | ChromaDB 不擅长大对象；磁盘 + 路径串方案干净 |
+| 同一文档所有 chunk 共享全部图 | 第一版简化；可后续做 chunk-图位置精细对齐 |
+| **query string 鉴权**而非 header | `<img src="...">` 标签发不了自定义 header |
+
+> 仅支持 OOXML 格式（.docx，Word 2007+）；旧版二进制 .doc 需先用 Word/LibreOffice 另存为 .docx。
 
 ---
 
@@ -290,6 +338,7 @@ curl -X POST http://localhost:8000/query \
 
 | 版本 | 主要变更 |
 | --- | --- |
+| **v1.2.2** | 新增图文混合检索：上传 PDF/Word 自动抽内嵌图（PyMuPDF + python-docx），md5 去重存盘；检索时随 chunk 返回，前端 Gradio 画廊实时渲染；新增 `/files/{user_id}/{path}` 私有图片路由（token 鉴权 + 防越权 + 防路径穿越）；`retrieval_engine.hybrid_search` 透传 metadata |
 | **v1.2.1** | 新增 `/query/stream` 流式问答接口（SSE 逐 token 推送）；前端 Gradio 实时打字效果；上传重名检测与覆盖确认；敏感词过滤只查用户原始 query；修复 SSE 中文乱码（增量 UTF-8 解码 + charset 头）；Windows 启动加 `-X utf8` |
 | **v1.2.0** | README 全面更新；docs/部署文档完善 |
 | **v1.1.0** | 双 LLM Provider；Gradio basic auth；云服务器部署套件；多用户私有知识库；上下文裁剪优化；MySQL URL 编码 fix |
@@ -309,4 +358,4 @@ curl -X POST http://localhost:8000/query \
 
 ---
 
-> **Tip**：踩坑记录与最佳实践详见 [`deploy/README.md`](deploy/README.md) 和 [项目作者的博客](https://2024150227.github.io/)（建设中）。
+> **Tip**：踩坑记录与最佳实践详见 [`deploy/README.md`](deploy/README.md) 和 [项目作者的博客](https://2024150227.github.io/)（含 SSE 中文乱码修复、1G 内存云部署、工程化踩坑实录等系列文章）。

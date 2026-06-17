@@ -1,5 +1,5 @@
-from fastapi import APIRouter, File, UploadFile, HTTPException, Header
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, File, UploadFile, HTTPException, Header, Query
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 from uuid import uuid4
 from typing import Optional, List
@@ -18,6 +18,49 @@ from app.utils.logger import logger
 import os
 
 router = APIRouter()
+
+
+# ==================== 图片相关辅助 ====================
+
+# uploads 根目录（与 document_processor.UPLOAD_ROOT 保持一致）
+_UPLOAD_ROOT = "uploads"
+
+
+def _images_meta_to_urls(metadata: dict) -> list:
+    """从单个 chunk 的 metadata 里把 images 字段拆成 URL 列表。
+
+    metadata['images'] 是逗号分隔的相对路径（ChromaDB metadata 不支持 list）。
+    URL 形如 ``/files/<相对路径>?token=xxx``，token 由前端拼。
+    这里只返回相对路径，让前端拼绝对地址 + token。
+    """
+    if not metadata:
+        return []
+    raw = metadata.get('images') or ''
+    if not raw:
+        return []
+    # 去重保序
+    seen = set()
+    paths = []
+    for p in raw.split(','):
+        p = p.strip()
+        if p and p not in seen:
+            seen.add(p)
+            paths.append(p)
+    return paths
+
+
+def _collect_image_urls(retrieved_docs: list) -> list:
+    """把多个 chunk 的图片去重合并，返回相对路径列表。"""
+    seen = set()
+    urls = []
+    for doc in retrieved_docs:
+        meta = doc.get('metadata') or {}
+        for p in _images_meta_to_urls(meta):
+            if p not in seen:
+                seen.add(p)
+                urls.append(p)
+    return urls
+
 
 # ==================== 用户认证接口 ====================
 
@@ -270,13 +313,17 @@ async def query(request: QueryRequest, token: Optional[str] = Header(None)):
         
         # 获取执行统计
         stats = rag_hooks.get_execution_stats(session_id)
-        
+
+        # 检索文档涉及到的图片（去重后的相对路径列表）
+        image_urls = _collect_image_urls(retrieved_docs)
+
         return {
             'code': 200,
             'message': 'success',
             'data': {
                 'answer': processed_answer,
                 'context': retrieved_docs,
+                'images': image_urls,
                 'session_id': session_id,
                 'user_id': user_id
             },
@@ -358,6 +405,7 @@ async def query_stream(request: QueryRequest, token: Optional[str] = Header(None
                 "session_id": session_id,
                 "user_id": user_id,
                 "context": retrieved_docs,
+                "images": _collect_image_urls(retrieved_docs),
                 "request_id": request_id,
             }
             yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
@@ -502,7 +550,10 @@ async def upload_file(
         with open(file_path, 'wb') as f:
             f.write(await file.read())
 
-        content = document_processor.extract_text(file_path)
+        # 同时抽文本和图（图抽不到不影响入库）
+        result = document_processor.extract_text_and_images(file_path, user_id)
+        content = result["text"]
+        image_paths = result["images"]  # uploads/<user_id>/_images/<stem>/xxx.png
 
         if not content:
             return {
@@ -540,15 +591,18 @@ async def upload_file(
             }
 
         ids = [f"doc_{user_id[:8]}_{uuid4().hex[:8]}_{i}" for i in range(len(valid_chunks))]
-        # metadata 加 user_id，检索时按 user_id 过滤实现私有
+        # ChromaDB metadata 不支持 list，用逗号分隔字符串存图片相对路径。
+        # 第一版：同一文档所有 chunk 共享该文档全部图（不做精细对齐）。
+        images_csv = ','.join(image_paths)
         metadatas = [{
             'filename': file.filename,
             'chunk_index': i,
             'user_id': user_id,
+            'images': images_csv,
         } for i in range(len(valid_chunks))]
 
         success = chroma_service.add_documents(valid_chunks, valid_embeddings, metadatas, ids)
-        
+
         if success:
             return {
                 'code': 200,
@@ -556,7 +610,8 @@ async def upload_file(
                 'data': {
                     'filename': file.filename,
                     'chunks_count': len(valid_chunks),
-                    'embeddings_count': len(valid_embeddings)
+                    'embeddings_count': len(valid_embeddings),
+                    'images_count': len(image_paths),
                 },
                 'request_id': request_id
             }
@@ -576,6 +631,48 @@ async def upload_file(
             'data': {},
             'request_id': request_id
         }
+
+# ==================== 图片静态文件接口 ====================
+
+@router.get("/files/{user_id}/{file_path:path}")
+async def serve_user_file(
+    user_id: str,
+    file_path: str,
+    token: Optional[str] = Query(None),
+    token_header: Optional[str] = Header(None, alias="token"),
+):
+    """提供登录用户私有文件下载（主要用于检索结果中的图片）。
+
+    URL 形如 ``/files/<user_id>/_images/<stem>/xxx.png?token=xxx``。
+    因为 <img> 标签发不了自定义 header，token 默认走 query string；
+    如果是程序化调用（带 header）也支持。
+
+    安全性：
+        1. token 必须有效
+        2. token 对应的 user_id 必须与 URL 中 user_id 完全一致（防越权）
+        3. 解析后的绝对路径必须在 uploads/<user_id>/ 内（防 ../ 穿越）
+    """
+    # 1. 鉴权：query 优先于 header（前端 <img> 用 query）
+    auth_token = token or token_header
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="缺少认证令牌")
+    auth = user_service.verify_token(auth_token)
+    if not auth.get("valid"):
+        raise HTTPException(status_code=401, detail=auth.get("message") or "令牌无效")
+    if auth["user_id"] != user_id:
+        # 不能用别人的 token 看你的图，反之亦然
+        raise HTTPException(status_code=403, detail="无权访问该文件")
+
+    # 2. 路径合法性校验
+    user_root = os.path.abspath(os.path.join(_UPLOAD_ROOT, user_id))
+    target_abs = os.path.abspath(os.path.join(_UPLOAD_ROOT, user_id, file_path))
+    if not target_abs.startswith(user_root + os.sep) and target_abs != user_root:
+        raise HTTPException(status_code=403, detail="非法路径")
+    if not os.path.isfile(target_abs):
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    return FileResponse(target_abs)
+
 
 # ==================== 批量查询接口（批处理优化） ====================
 
