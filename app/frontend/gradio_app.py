@@ -82,6 +82,64 @@ def logout_user(token):
 
 # ==================== 查询函数（集成Hooks） ====================
 
+# 节点配色（按链路阶段分组）
+#   蓝   = 检索类（embedding / vector / BM25）
+#   绿   = 合并 / 后处理
+#   黄   = 重排
+#   灰   = 历史 / 缓存（轻量）
+#   红   = LLM 推理（瓶颈强调色）
+_NODE_PALETTE = [
+    ("history_fetch",    "历史拉取",    "#9aa0a6"),
+    ("query_embedding",  "问题向量化",  "#1a73e8"),
+    ("vector_search",    "向量检索",    "#1a73e8"),
+    ("bm25_search",      "BM25 检索",   "#34a853"),
+    ("merge_dedup",      "合并去重",    "#34a853"),
+    ("rerank",           "重排",        "#fbbc04"),
+    ("llm_cache_lookup", "LLM 缓存",    "#9aa0a6"),
+    ("llm_inference",    "LLM 推理",    "#ea4335"),
+]
+
+
+def render_waterfall(node_timings: dict, total_time: float) -> str:
+    """节点耗时瀑布图（纯 HTML / CSS）。
+
+    每行一个节点：左侧文字标签 + 右侧按耗时占比拉伸的彩色横条 +
+    数值标注（秒 + 占比 %）。空数据返回提示文案。
+    """
+    if not node_timings or total_time <= 0:
+        return "<p style='color:#888;font-size:13px;'>暂无节点耗时数据，发起一次问答即可生成。</p>"
+
+    rows = []
+    for key, label, color in _NODE_PALETTE:
+        durations = node_timings.get(key) or []
+        if not durations:
+            continue
+        dur = sum(durations)
+        pct = (dur / total_time) * 100 if total_time > 0 else 0
+        bar_w = max(pct, 0.4)  # 极短的节点至少给一点可见宽度
+
+        rows.append(
+            "<div style='display:flex;align-items:center;margin:6px 0;"
+            "font-family:Consolas,Menlo,monospace;font-size:13px;'>"
+            f"<div style='width:110px;flex-shrink:0;color:#444;'>{label}</div>"
+            "<div style='flex:1;background:#f1f3f4;height:22px;border-radius:3px;"
+            "position:relative;overflow:hidden;'>"
+            f"<div style='width:{bar_w:.2f}%;background:{color};height:100%;'></div>"
+            "<span style='position:absolute;left:8px;top:0;line-height:22px;"
+            f"font-size:12px;color:#222;'>{dur:.3f}s ({pct:.1f}%)</span>"
+            "</div></div>"
+        )
+
+    if not rows:
+        return "<p style='color:#888;font-size:13px;'>暂无节点耗时数据</p>"
+
+    header = (
+        f"<div style='font-weight:600;margin-bottom:8px;color:#222;'>"
+        f"总耗时 {total_time:.3f}s</div>"
+    )
+    return header + "".join(rows)
+
+
 def query_api(query, session_id, token):
     """查询API（带认证）"""
     try:
@@ -141,8 +199,8 @@ def query_api(query, session_id, token):
 def query_api_stream(query, session_id, token):
     """流式查询 API：generator，逐 token yield 部分结果。
 
-    每次 yield 6 元组（answer/context/session_id/timing/llm_str/image_urls），让 Gradio 实时
-    更新对应输出框。第一次 yield 给一个空答案表示"开始"，后续逐渐填充。
+    每次 yield 7 元组（answer/context/session_id/timing/llm_str/image_urls/waterfall_html），
+    让 Gradio 实时更新对应输出框。第一次 yield 给一个空答案表示"开始"，后续逐渐填充。
     """
     headers = {"Content-Type": "application/json"}
     if token:
@@ -155,9 +213,10 @@ def query_api_stream(query, session_id, token):
     timing_str = "⏳ 生成中..."
     llm_str = "⏳ 正在生成中... (流式输出已启用)"
     image_urls = []  # gr.Gallery 接受 url 列表
+    waterfall_html = "<p style='color:#888;font-size:13px;'>⏳ 等待 LLM 输出完成...</p>"
 
     # 先 yield 一次"开始"状态，让用户看到反馈
-    yield answer, context_str, session_id, timing_str, llm_str, image_urls
+    yield answer, context_str, session_id, timing_str, llm_str, image_urls, waterfall_html
 
     try:
         with requests.post(
@@ -168,7 +227,7 @@ def query_api_stream(query, session_id, token):
             timeout=300,
         ) as resp:
             if resp.status_code != 200:
-                yield f"❌ HTTP {resp.status_code}", "", session_id, "", "", []
+                yield f"❌ HTTP {resp.status_code}", "", session_id, "", "", [], waterfall_html
                 return
 
             # SSE 流是 UTF-8 字节流，但 requests.iter_lines(decode_unicode=True) 在
@@ -231,20 +290,22 @@ def query_api_stream(query, session_id, token):
                         if token:
                             url += f"?token={token}"
                         image_urls.append(url)
-                    yield answer, context_str, session_id, timing_str, llm_str, image_urls
+                    yield answer, context_str, session_id, timing_str, llm_str, image_urls, waterfall_html
 
                 elif ftype == "token":
                     answer += frame.get("content", "")
-                    yield answer, context_str, session_id, timing_str, llm_str, image_urls
+                    yield answer, context_str, session_id, timing_str, llm_str, image_urls, waterfall_html
 
                 elif ftype == "fixed":
                     # after-model 钩子修改了答案（例如敏感词过滤）
                     answer = frame.get("content", answer)
-                    yield answer, context_str, session_id, timing_str, llm_str, image_urls
+                    yield answer, context_str, session_id, timing_str, llm_str, image_urls, waterfall_html
 
                 elif ftype == "done":
                     exec_t = frame.get("execution_time", 0)
                     hooks_timing = frame.get("hooks_timing", {})
+                    node_timings = frame.get("node_timings", {})
+
                     timing_str = f"**总耗时**: {exec_t:.3f}秒\n\n**各阶段耗时**:\n"
                     for k, v in hooks_timing.items():
                         timing_str += f"- {k}: {v:.3f}秒\n"
@@ -254,23 +315,27 @@ def query_api_stream(query, session_id, token):
                         f"**输出 token 数**: {stats.get('token_count', 0)}\n"
                         f"**流式输出**: ✅\n"
                     )
-                    yield answer, context_str, session_id, timing_str, llm_str, image_urls
+
+                    # 节点级瀑布图：基于后端返回的 node_timings 渲染
+                    waterfall_html = render_waterfall(node_timings, exec_t)
+
+                    yield answer, context_str, session_id, timing_str, llm_str, image_urls, waterfall_html
 
                 elif ftype == "error":
                     msg = frame.get("message", "未知错误")
                     code = frame.get("code", 500)
                     if code == 401:
-                        yield "⚠️ 请先登录后再进行查询", "", session_id, "", "", []
+                        yield "⚠️ 请先登录后再进行查询", "", session_id, "", "", [], waterfall_html
                     elif code == 403:
-                        yield f"⚠️ {msg}", "", session_id, "", "", []
+                        yield f"⚠️ {msg}", "", session_id, "", "", [], waterfall_html
                     elif code == 404:
-                        yield "未找到相关信息", "", session_id, "", "", []
+                        yield "未找到相关信息", "", session_id, "", "", [], waterfall_html
                     else:
-                        yield f"❌ {msg}", "", session_id, "", "", []
+                        yield f"❌ {msg}", "", session_id, "", "", [], waterfall_html
                     return
 
     except Exception as e:
-        yield f"❌ API调用失败: {str(e)}", context_str, session_id, "", "", image_urls
+        yield f"❌ API调用失败: {str(e)}", context_str, session_id, "", "", image_urls, waterfall_html
 
 # ==================== 会话历史浏览函数 ====================
 
@@ -635,20 +700,27 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
             with gr.Column(scale=2):
                 gr.Markdown("### 📚 检索到的文档")
                 context_output = gr.Textbox(label="上下文", lines=10, interactive=False)
-            
+
             with gr.Column(scale=1):
                 gr.Markdown("### ⏱️ 链路耗时统计")
                 timing_output = gr.Textbox(label="执行耗时", lines=6, interactive=False)
-            
+
             with gr.Column(scale=1):
                 gr.Markdown("### 📊 LLM统计")
                 llm_output = gr.Textbox(label="LLM信息", lines=6, interactive=False)
+
+        # 节点级瀑布图：把链路黑盒拆开，一眼看出哪个节点最慢
+        gr.Markdown("### 🔬 节点级耗时瀑布图")
+        waterfall_output = gr.HTML(
+            value="<p style='color:#888;font-size:13px;'>暂无节点耗时数据，发起一次问答即可生成。</p>",
+            label="节点耗时",
+        )
         
         # 提交查询（流式）
         submit_btn.click(
             query_api_stream,
             inputs=[query_input, session_id, token_state],
-            outputs=[answer_output, context_output, session_display, timing_output, llm_output, images_gallery]
+            outputs=[answer_output, context_output, session_display, timing_output, llm_output, images_gallery, waterfall_output]
         ).then(
             # 查询完成后刷新历史
             load_session_history,
@@ -664,7 +736,7 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
         query_input.submit(
             query_api_stream,
             inputs=[query_input, session_id, token_state],
-            outputs=[answer_output, context_output, session_display, timing_output, llm_output, images_gallery]
+            outputs=[answer_output, context_output, session_display, timing_output, llm_output, images_gallery, waterfall_output]
         ).then(
             load_session_history,
             inputs=[session_id, token_state],

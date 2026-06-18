@@ -9,6 +9,7 @@ from app.services.sensitive_filter import sensitive_filter
 from app.services.llm_service import llm_service
 from app.db.redis_client import redis_client
 from app.utils.logger import logger
+from app.utils.timer import set_session, time_block
 
 class RAGHooks:
     """RAG系统钩子管理器"""
@@ -48,16 +49,20 @@ class RAGHooks:
             
             user_id = verify_result["user_id"]
             username = verify_result["username"]
-            
+
             # 2. 会话隔离加载
             session_id = user_service.get_user_session(user_id)
-            
+
+            # 绑定到当前协程上下文，后续 services 层 time_block 会写到这个 session_id 名下
+            set_session(session_id)
+
             # 记录执行统计
             self.execution_stats[session_id] = {
                 "start_time": start_time,
                 "user_id": user_id,
                 "username": username,
-                "hooks_timing": {}
+                "hooks_timing": {},
+                "node_timings": {},
             }
             
             hook_time = time.time() - start_time
@@ -117,7 +122,8 @@ class RAGHooks:
                 }
 
             # 2. 动态Prompt组装（在敏感词检查之后再拼接，节省一次正则扫描）
-            history_str = memory_service.format_history_for_prompt(session_id)
+            with time_block("history_fetch"):
+                history_str = memory_service.format_history_for_prompt(session_id)
             final_prompt = self._assemble_prompt(history_str, retrieval_context, user_query)
 
             # 3. 上下文裁剪控长
@@ -233,7 +239,8 @@ class RAGHooks:
         try:
             # 1. 检查缓存
             cache_key = self._generate_cache_key(query, prompt)
-            cached_response = self._get_cached_response(cache_key)
+            with time_block("llm_cache_lookup"):
+                cached_response = self._get_cached_response(cache_key)
             
             if cached_response:
                 token_count = self._estimate_token_count(cached_response)
@@ -262,8 +269,9 @@ class RAGHooks:
             
             for attempt in range(max_retries):
                 try:
-                    response = llm_service.generate(query, prompt)
-                    
+                    with time_block("llm_inference"):
+                        response = llm_service.generate(query, prompt)
+
                     if response and not response.startswith("LLM调用失败"):
                         # 成功，缓存结果
                         self._cache_response(cache_key, response)
@@ -472,14 +480,18 @@ class RAGHooks:
             # 生成会话摘要
             summary = self._generate_summary(user_query, assistant_output)
             self._cache_summary(session_id, summary)
-            
+
             logger.info(f"[after-agent] 链路完成, 总耗时: {total_time:.3f}s")
-            
+
+            # 节点级耗时一行汇总，一眼能看出瓶颈
+            self._log_node_timings_summary(session_id, total_time)
+
             return {
                 "success": True,
                 "message": "链路统计与持久化完成",
                 "total_time": total_time,
-                "hooks_timing": stats.get("hooks_timing", {})
+                "hooks_timing": stats.get("hooks_timing", {}),
+                "node_timings": stats.get("node_timings", {}),
             }
             
         except Exception as e:
@@ -497,6 +509,33 @@ class RAGHooks:
         query_summary = query[:50] if len(query) > 50 else query
         answer_summary = answer[:100] if len(answer) > 100 else answer
         return f"问: {query_summary} 答: {answer_summary}"
+
+    def _log_node_timings_summary(self, session_id: str, total_time: float) -> None:
+        """打印一行节点级耗时汇总，方便排查瓶颈。
+
+        例：
+        [perf] sid=a7f3e1c2 emb=0.045s vec=0.182s bm25=0.038s merge=0.001s
+               rerank=0.812s hist=0.009s cache=0.002s llm=3.050s total=4.139s
+        """
+        stats = self.execution_stats.get(session_id, {})
+        nt = stats.get("node_timings", {})
+
+        def _sum(name: str) -> float:
+            """同一节点可能多次调用（比如多轮 embedding），求和"""
+            return sum(nt.get(name, []) or [0.0])
+
+        parts = [
+            f"emb={_sum('query_embedding'):.3f}s",
+            f"vec={_sum('vector_search'):.3f}s",
+            f"bm25={_sum('bm25_search'):.3f}s",
+            f"merge={_sum('merge_dedup'):.3f}s",
+            f"rerank={_sum('rerank'):.3f}s",
+            f"hist={_sum('history_fetch'):.3f}s",
+            f"cache={_sum('llm_cache_lookup'):.3f}s",
+            f"llm={_sum('llm_inference'):.3f}s",
+            f"total={total_time:.3f}s",
+        ]
+        logger.info(f"[perf] sid={session_id[:8]} " + " ".join(parts))
     
     def _cache_summary(self, session_id: str, summary: str):
         """缓存会话摘要到Redis"""

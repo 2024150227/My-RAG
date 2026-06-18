@@ -15,6 +15,7 @@ from app.services.memory_service import memory_service
 from app.services.user_service import user_service
 from app.services.hooks_manager import rag_hooks
 from app.utils.logger import logger
+from app.utils.timer import set_session, time_block
 import os
 
 router = APIRouter()
@@ -184,6 +185,7 @@ class QueryResponse(BaseModel):
     request_id: str
     execution_time: float = None
     hooks_timing: dict = None
+    node_timings: dict = None
     llm_stats: dict = None
 
 class BatchQueryRequest(BaseModel):
@@ -330,6 +332,7 @@ async def query(request: QueryRequest, token: Optional[str] = Header(None)):
             'request_id': request_id,
             'execution_time': after_agent_result.get("total_time", 0),
             'hooks_timing': after_agent_result.get("hooks_timing", {}),
+            'node_timings': after_agent_result.get("node_timings", {}),
             'llm_stats': {
                 'token_count': llm_token_count,
                 'cache_hit': wrap_model_result.get("cache_hit", False),
@@ -397,6 +400,10 @@ async def query_stream(request: QueryRequest, token: Optional[str] = Header(None
 
     # ---------- 生成器：调 LLM 流 + 收尾钩子 ----------
     async def event_generator():
+        # StreamingResponse 会切到新协程上下文，重新绑定 session_id，
+        # 让 LLM 流式阶段以及 after_model / after_agent 里的埋点写到正确的统计池
+        set_session(session_id)
+
         start_time = time.time()
         try:
             # 1. 先发一个 meta 帧，告诉前端 session_id 和 context
@@ -412,12 +419,13 @@ async def query_stream(request: QueryRequest, token: Optional[str] = Header(None
 
             # 2. 流式调 LLM，每个 token 发一帧
             answer_chunks = []
-            for token_text in llm_service.generate_stream(request.query, final_prompt):
-                answer_chunks.append(token_text)
-                frame = {"type": "token", "content": token_text}
-                yield f"data: {json.dumps(frame, ensure_ascii=False)}\n\n"
-                # 让出事件循环，避免长时间占用
-                await asyncio.sleep(0)
+            with time_block("llm_inference"):
+                for token_text in llm_service.generate_stream(request.query, final_prompt):
+                    answer_chunks.append(token_text)
+                    frame = {"type": "token", "content": token_text}
+                    yield f"data: {json.dumps(frame, ensure_ascii=False)}\n\n"
+                    # 让出事件循环，避免长时间占用
+                    await asyncio.sleep(0)
 
             answer = "".join(answer_chunks).strip()
 
@@ -440,6 +448,7 @@ async def query_stream(request: QueryRequest, token: Optional[str] = Header(None
                 "type": "done",
                 "execution_time": after_agent_result.get("total_time", time.time() - start_time),
                 "hooks_timing": after_agent_result.get("hooks_timing", {}),
+                "node_timings": after_agent_result.get("node_timings", {}),
                 "llm_stats": {
                     "token_count": len(answer_chunks),
                     "stream": True,
