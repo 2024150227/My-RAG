@@ -4,19 +4,30 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings:
-    # 硅基流动API配置
+    # 硅基流动 API 配置（rerank 仍用，embedding/LLM 可选）
     SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
     SILICONFLOW_EMBED_URL = os.getenv("SILICONFLOW_EMBED_URL", "https://api.siliconflow.cn/v1/embeddings")
     SILICONFLOW_RERANK_URL = os.getenv("SILICONFLOW_RERANK_URL", "https://api.siliconflow.cn/v1/rerank")
-    
+
+    # 火山方舟（Ark）配置
+    # 标准 OpenAI 兼容端点是 /api/v3，不是 /api/coding（后者是 Anthropic 协议兼容，给 Claude Code 用的）
+    ARK_API_KEY = os.getenv("ARK_API_KEY", "")
+    ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+    ARK_LLM_MODEL = os.getenv("ARK_LLM_MODEL", "doubao-1-5-pro-32k-250115")
+    ARK_EMBED_MODEL = os.getenv("ARK_EMBED_MODEL", "doubao-embedding-large-text-240915")
+
     # Ollama配置
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen:latest")
 
-    # LLM 提供方：ollama（默认，本地） / siliconflow（云端 API）
-    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
+    # LLM 提供方：ollama（本地） / siliconflow（云端 API） / ark（火山方舟，默认）
+    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ark").lower()
     SILICONFLOW_LLM_URL = os.getenv("SILICONFLOW_LLM_URL", "https://api.siliconflow.cn/v1/chat/completions")
     SILICONFLOW_LLM_MODEL = os.getenv("SILICONFLOW_LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+
+    # Embedding 提供方：siliconflow / ark（默认 ark）
+    # 注意：换 embedding 模型 = 向量维度可能不一致，必须清空 ChromaDB 重新入库
+    EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "ark").lower()
 
     # Gradio 访问鉴权（用户名,密码；为空表示不启用）
     GRADIO_AUTH_USER = os.getenv("GRADIO_AUTH_USER", "")

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  MY-RAG 应用部署脚本（1G 内存 / LLM 走硅基流动版）
+#  MY-RAG 应用部署脚本（1G 内存 / LLM + Embedding 走火山方舟，rerank 走硅基流动）
 #  约定：
 #    - 项目代码已经上传到 /opt/my-rag
 #    - 服务器环境已经用 server-setup.sh 装好
 #  使用：
-#      export SILICONFLOW_API_KEY=sk-xxx
+#      export ARK_API_KEY=ark-xxx                 # 火山方舟（LLM + Embedding）
+#      export SILICONFLOW_API_KEY=sk-xxx          # 仅用于 rerank
 #      export GRADIO_AUTH_PASSWORD='你的密码'
 #      sudo -E bash /opt/my-rag/deploy/install-app.sh
 # =============================================================================
@@ -18,8 +19,17 @@ APP_USER="${APP_USER:-rag}"
 MYSQL_APP_USER="${MYSQL_APP_USER:-rag}"
 MYSQL_APP_PASSWORD="${MYSQL_APP_PASSWORD:-RagApp@2026}"
 MYSQL_DATABASE="${MYSQL_DATABASE:-rag_db}"
-SILICONFLOW_API_KEY="${SILICONFLOW_API_KEY:?需要设置 SILICONFLOW_API_KEY 环境变量}"
+
+# 火山方舟（LLM + Embedding）
+ARK_API_KEY="${ARK_API_KEY:?需要设置 ARK_API_KEY 环境变量}"
+ARK_BASE_URL="${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}"
+ARK_LLM_MODEL="${ARK_LLM_MODEL:-doubao-1-5-pro-32k-250115}"
+ARK_EMBED_MODEL="${ARK_EMBED_MODEL:-doubao-embedding-large-text-240915}"
+
+# 硅基流动（仅 rerank）
+SILICONFLOW_API_KEY="${SILICONFLOW_API_KEY:?需要设置 SILICONFLOW_API_KEY 环境变量（rerank 用）}"
 SILICONFLOW_LLM_MODEL="${SILICONFLOW_LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}"
+
 GRADIO_AUTH_USER="${GRADIO_AUTH_USER:-admin}"
 GRADIO_AUTH_PASSWORD="${GRADIO_AUTH_PASSWORD:-admin@2026}"
 PUBLIC_IP="${PUBLIC_IP:-47.106.186.17}"
@@ -57,15 +67,23 @@ echo "============================================================"
 echo "  [3/5] 写入 .env"
 echo "============================================================"
 cat > "$APP_DIR/.env" <<EOF
-# === 硅基流动 API（embedding / rerank / LLM 共用一个 key）===
+# === 硅基流动 API（仅 rerank 仍用）===
 SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY}
 SILICONFLOW_EMBED_URL=https://api.siliconflow.cn/v1/embeddings
 SILICONFLOW_RERANK_URL=https://api.siliconflow.cn/v1/rerank
 SILICONFLOW_LLM_URL=https://api.siliconflow.cn/v1/chat/completions
-
-# === LLM Provider（关键：1G 服务器走云端，不要用 ollama）===
-LLM_PROVIDER=siliconflow
 SILICONFLOW_LLM_MODEL=${SILICONFLOW_LLM_MODEL}
+
+# === 火山方舟 API（LLM + Embedding）===
+# 注意：API base 用 /api/v3（OpenAI 兼容），不是 /api/coding（Anthropic 兼容）
+ARK_API_KEY=${ARK_API_KEY}
+ARK_BASE_URL=${ARK_BASE_URL}
+ARK_LLM_MODEL=${ARK_LLM_MODEL}
+ARK_EMBED_MODEL=${ARK_EMBED_MODEL}
+
+# === Provider 切换 ===
+LLM_PROVIDER=ark
+EMBED_PROVIDER=ark
 
 # Ollama 占位（不会被使用，但 config.py 仍会读，留着兼容）
 OLLAMA_BASE_URL=http://127.0.0.1:11434
@@ -187,7 +205,9 @@ echo "  ✅ 部署完成"
 echo "============================================================"
 echo "  前端:  http://${PUBLIC_IP}:7860   (账号: ${GRADIO_AUTH_USER} / 密码: ${GRADIO_AUTH_PASSWORD})"
 echo "  API :  http://${PUBLIC_IP}:8000"
-echo "  LLM :  ${SILICONFLOW_LLM_MODEL} (硅基流动 API)"
+echo "  LLM :  ${ARK_LLM_MODEL} (火山方舟)"
+echo "  Embedding: ${ARK_EMBED_MODEL} (火山方舟)"
+echo "  Rerank: BAAI/bge-reranker-v2-m3 (硅基流动)"
 echo
 echo "  常用命令:"
 echo "    journalctl -u my-rag-api -f       # 看 API 日志"
