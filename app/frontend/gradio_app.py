@@ -105,9 +105,17 @@ def render_waterfall(node_timings: dict, total_time: float) -> str:
 
     每行一个节点：左侧文字标签 + 右侧按耗时占比拉伸的彩色横条 +
     数值标注（秒 + 占比 %）。空数据返回提示文案。
+
+    样式上用了独立的白底容器 + 深色文字，避免 Gradio 主题切到深色或灰底时
+    文字颜色（#222 / #444）变得跟背景太接近导致看不清；条形上的数字也用
+    带半透明白色描边，保证压在彩色条形上时仍清晰可读。
     """
     if not node_timings or total_time <= 0:
-        return "<p style='color:#888;font-size:13px;'>暂无节点耗时数据，发起一次问答即可生成。</p>"
+        return (
+            "<div style='background:#ffffff;color:#1f1f1f;padding:12px;"
+            "border:1px solid #e5e7eb;border-radius:6px;font-size:13px;'>"
+            "暂无节点耗时数据，发起一次问答即可生成。</div>"
+        )
 
     rows = []
     for key, label, color in _NODE_PALETTE:
@@ -121,23 +129,39 @@ def render_waterfall(node_timings: dict, total_time: float) -> str:
         rows.append(
             "<div style='display:flex;align-items:center;margin:6px 0;"
             "font-family:Consolas,Menlo,monospace;font-size:13px;'>"
-            f"<div style='width:110px;flex-shrink:0;color:#444;'>{label}</div>"
-            "<div style='flex:1;background:#f1f3f4;height:22px;border-radius:3px;"
+            # 左侧标签：明确深色文字，避免主题切深色时不可见
+            f"<div style='width:110px;flex-shrink:0;color:#1f1f1f;font-weight:600;'>{label}</div>"
+            # 条形外框：浅灰底
+            "<div style='flex:1;background:#e8eaed;height:24px;border-radius:3px;"
             "position:relative;overflow:hidden;'>"
+            # 实际彩色条
             f"<div style='width:{bar_w:.2f}%;background:{color};height:100%;'></div>"
-            "<span style='position:absolute;left:8px;top:0;line-height:22px;"
-            f"font-size:12px;color:#222;'>{dur:.3f}s ({pct:.1f}%)</span>"
+            # 数值标签：用 text-shadow 描边，保证在彩色条 / 浅灰底上都看得清
+            "<span style='position:absolute;left:8px;top:0;line-height:24px;"
+            "font-size:12px;color:#1f1f1f;font-weight:600;"
+            "text-shadow:0 0 3px rgba(255,255,255,0.9),0 0 2px rgba(255,255,255,0.9);'>"
+            f"{dur:.3f}s ({pct:.1f}%)</span>"
             "</div></div>"
         )
 
     if not rows:
-        return "<p style='color:#888;font-size:13px;'>暂无节点耗时数据</p>"
+        return (
+            "<div style='background:#ffffff;color:#1f1f1f;padding:12px;"
+            "border:1px solid #e5e7eb;border-radius:6px;font-size:13px;'>"
+            "暂无节点耗时数据</div>"
+        )
 
     header = (
-        f"<div style='font-weight:600;margin-bottom:8px;color:#222;'>"
-        f"总耗时 {total_time:.3f}s</div>"
+        f"<div style='font-weight:700;margin-bottom:10px;color:#1f1f1f;"
+        f"font-size:14px;'>总耗时 {total_time:.3f}s</div>"
     )
-    return header + "".join(rows)
+    # 整张图包一层白底卡片，主题切深色也能保证可读
+    return (
+        "<div style='background:#ffffff;color:#1f1f1f;padding:14px 16px;"
+        "border:1px solid #e5e7eb;border-radius:6px;'>"
+        + header + "".join(rows) +
+        "</div>"
+    )
 
 
 def query_api(query, session_id, token):
@@ -213,7 +237,11 @@ def query_api_stream(query, session_id, token):
     timing_str = "⏳ 生成中..."
     llm_str = "⏳ 正在生成中... (流式输出已启用)"
     image_urls = []  # gr.Gallery 接受 url 列表
-    waterfall_html = "<p style='color:#888;font-size:13px;'>⏳ 等待 LLM 输出完成...</p>"
+    waterfall_html = (
+        "<div style='background:#ffffff;color:#1f1f1f;padding:12px;"
+        "border:1px solid #e5e7eb;border-radius:6px;font-size:13px;'>"
+        "⏳ 等待 LLM 输出完成...</div>"
+    )
 
     # 先 yield 一次"开始"状态，让用户看到反馈
     yield answer, context_str, session_id, timing_str, llm_str, image_urls, waterfall_html
@@ -712,7 +740,11 @@ with gr.Blocks(title="企业级RAG知识库系统", theme=gr.themes.Soft()) as d
         # 节点级瀑布图：把链路黑盒拆开，一眼看出哪个节点最慢
         gr.Markdown("### 🔬 节点级耗时瀑布图")
         waterfall_output = gr.HTML(
-            value="<p style='color:#888;font-size:13px;'>暂无节点耗时数据，发起一次问答即可生成。</p>",
+            value=(
+                "<div style='background:#ffffff;color:#1f1f1f;padding:12px;"
+                "border:1px solid #e5e7eb;border-radius:6px;font-size:13px;'>"
+                "暂无节点耗时数据，发起一次问答即可生成。</div>"
+            ),
             label="节点耗时",
         )
         
