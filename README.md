@@ -23,7 +23,8 @@
 ### 大语言模型
 - 🔀 **双 Provider 切换**：通过 `LLM_PROVIDER` 环境变量在本地 Ollama 与硅基流动云端 API 间无缝切换
 - 📡 **流式输出（SSE）**：`/query/stream` 接口逐 token 返回，前端 Gradio 像 ChatGPT 一样实时打字效果
-- 🎯 **链路 Hooks**：`before_retrieval` / `before_model` / `after_model` 三段切片，便于埋点 / 限流 / 内容审计
+- 🎯 **链路 Hooks**：`before_agent` / `before_model` / `wrap_model_call` / `after_model` / `after_agent` 五段切片，覆盖鉴权、Prompt 拼装、缓存重试熔断、格式修正、持久化全链路
+- 🔬 **节点级耗时埋点**：基于 `contextvars` 把 8 个关键节点（embedding / 向量检索 / BM25 / 合并 / rerank / 历史 / 缓存 / LLM）的耗时按 session_id 汇总；前端 Gradio 实时渲染 HTML 瀑布图，瓶颈节点红色高亮
 - ⚡ **上下文裁剪**：超长 prompt 自动按段落边界回退到 token 上限内
 - 💬 **多轮对话**：基于 Redis 的会话上下文 + MySQL 持久化历史
 
@@ -67,11 +68,14 @@ MY-RAG/
 │       ├── llm_service.py         # ★ 双 Provider 实现（ollama / siliconflow）
 │       ├── embedding_service.py   # 调硅基流动 embedding
 │       ├── rerank_service.py      # 调硅基流动 rerank
-│       ├── retrieval_engine.py    # 混合检索（向量 + BM25），透传 metadata
+│       ├── retrieval_engine.py    # 混合检索（向量 + BM25），透传 metadata + 5 段 time_block
 │       ├── chroma_service.py      # ChromaDB 客户端
 │       ├── document_processor.py  # 文档分块 + 图片抽取（PyMuPDF / python-docx）
 │       ├── user_service.py        # 注册 / 登录 / token 管理
-│       └── hooks_manager.py       # 链路 hooks（性能埋点、上下文裁剪）
+│       └── hooks_manager.py       # 链路 hooks（5 段切片 + 节点级耗时汇总）
+├── app/utils/
+│   ├── logger.py                  # 全局 logger
+│   └── timer.py                   # ★ 节点耗时计时器（contextvars + time_block）
 ├── deploy/                        # 云服务器部署脚本（Ubuntu）
 │   ├── server-setup.sh            # 装 Redis/MySQL/Python，配 swap、防火墙
 │   ├── install-app.sh             # venv + 写 .env + systemd
@@ -171,12 +175,13 @@ sudo -E bash deploy/install-app.sh                  # 部署应用 + systemd
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/upload` | 上传文档（按用户隔离，同名先返回 `409` 让前端确认覆盖；自动抽取内嵌图片） |
-| `POST` | `/query` | 单次问答（一次性返回完整答案，含相关图片 URL） |
-| `POST` | `/query/stream` | **流式问答**（SSE，逐 token 推送，前端实时打字效果，meta 帧含图片 URL） |
+| `POST` | `/query` | 单次问答（一次性返回完整答案，含相关图片 URL + 节点级 `node_timings`） |
+| `POST` | `/query/stream` | **流式问答**（SSE，逐 token 推送，前端实时打字效果，meta 帧含图片 URL，done 帧含 `node_timings`） |
 | `POST` | `/query/batch` | 批量问答 |
 | `GET` | `/stats` | 知识库统计 |
 | `DELETE` | `/clear` | 清空当前用户知识库 |
 | `GET` | `/files/{user_id}/{path}` | 私有图片下载（token 鉴权 + 防越权 + 防路径穿越） |
+| `GET` | `/execution-stats/{session_id}` | 查询会话级链路耗时（hooks_timing + node_timings） |
 
 ### 会话
 
@@ -184,7 +189,6 @@ sudo -E bash deploy/install-app.sh                  # 部署应用 + systemd
 | --- | --- | --- |
 | `POST` | `/session/new` | 新建会话 |
 | `GET` | `/session/history/{session_id}` | 查询会话历史 |
-| `GET` | `/execution-stats/{session_id}` | 查询链路耗时统计 |
 
 ### 调用示例
 
@@ -274,24 +278,69 @@ gr.Gallery 渲染（浏览器 <img> 通过 /files 路由拉图）
 
 ---
 
+## 🔬 链路可观测性
+
+整个 RAG 链路从黑盒拆成 8 个可观测节点，每次问答都自动统计耗时，前端实时渲染瀑布图。
+
+### 节点清单
+
+| # | 节点 | 干什么 | 典型耗时 |
+| --- | --- | --- | --- |
+| 1 | `query_embedding` | query 走 BGE-M3 向量化 | 30~80ms |
+| 2 | `vector_search` | ChromaDB 向量近邻搜索 | 50~300ms |
+| 3 | `bm25_search` | 关键词召回（与向量检索并行） | 20~80ms |
+| 4 | `merge_dedup` | 双路结果合并 + 去重 | 1~5ms |
+| 5 | `rerank` | BGE-Reranker-v2-m3 精排 top_k | 500~1500ms |
+| 6 | `history_fetch` | 从 Redis 拉多轮对话历史 | 5~20ms |
+| 7 | `llm_cache_lookup` | 查 LLM 输出缓存（命中跳过推理） | 1~5ms |
+| 8 | `llm_inference` | 真正调 LLM 出答案（流式 / 同步） | 2000~8000ms |
+
+### 实现要点
+
+- **`app/utils/timer.py`** 提供 `set_session(sid)` + `time_block(name)` 两个原语，基于 `contextvars` 把 session_id 绑到当前协程上下文，services 层不用感知"会话"概念
+- `before_agent` hook 入口绑定一次；SSE `event_generator` 入口再绑定一次（`StreamingResponse` 会切到新协程上下文）
+- 数据存到 `rag_hooks.execution_stats[sid]["node_timings"][name]`，类型是 list（同节点多次调用累加）
+- 单位**统一为秒**，与 `hooks_timing` 一致
+- `after_agent` 多打一行 `[perf]` 日志，例：
+
+  ```
+  [perf] sid=a7f3e1c2 emb=0.045s vec=0.182s bm25=0.038s merge=0.001s
+         rerank=0.812s hist=0.009s cache=0.002s llm=3.050s total=4.139s
+  ```
+
+- SSE `done` 帧与 `/query` 同步接口都返回 `node_timings` 字段
+- 前端 Gradio 用纯 HTML/CSS 渲染瀑布图（不引 matplotlib），瓶颈节点 LLM 推理用红色高亮
+
+### 设计取舍
+
+| 选择 | 原因 |
+| --- | --- |
+| `contextvars` 而非显式传 session_id | services 层不该感知"会话"概念；`contextvars` 是 Python 异步友好的标准方案 |
+| 存 list 而非单值 | 一次请求里 embedding / LLM 可能多次调用（多轮、多 chunk），存 list 才能算总和 / 平均 |
+| 不新增 hook 而是装饰节点 | 现有 5 个 hook 是**生命周期切片**，节点埋点是**性能观测**，两件事别混 |
+| 不引入 OpenTelemetry | 单机部署用不上分布式追踪；将来真要上 Jaeger 再换 |
+
+---
+
 ## 🔍 检索策略
 
 ```
 用户问题
    ↓
-[before_retrieval hook] 性能埋点 / 关键词改写
+[before_agent hook] 鉴权 / 起 stats / 绑定 contextvar
    ↓
-向量检索（BGE-M3）   +   BM25 检索      ← 并行召回
+hybrid_search 内 5 段 time_block：
+   query_embedding → vector_search ┐
+                                   ├→ merge_dedup → rerank
+                     bm25_search ──┘
    ↓
-结果合并 / 去重
+[before_model hook] history_fetch + Prompt 拼装 + 上下文裁剪 + 敏感词过滤
    ↓
-BGE-Reranker-v2-m3 重排                 ← 取 top_k
+[wrap_model_call hook] llm_cache_lookup → 未命中走 llm_inference（重试 / 熔断）
    ↓
-[before_model hook] Prompt 拼装 / 上下文裁剪 / 敏感词过滤
+[after_model hook] 输出格式修正
    ↓
-LLM 推理（Ollama 或 SiliconFlow）
-   ↓
-[after_model hook] 性能统计 / 历史落库
+[after_agent hook] MySQL 落库 + Redis 摘要 + [perf] 节点级耗时汇总日志
    ↓
 返回答案
 ```
@@ -338,6 +387,7 @@ curl -X POST http://localhost:8000/query \
 
 | 版本 | 主要变更 |
 | --- | --- |
+| **v1.2.3** | 新增节点级链路耗时埋点 + Gradio 瀑布图可视化：基于 `contextvars` 把 8 个关键节点（embedding / vector / BM25 / merge / rerank / history / cache / LLM）的耗时按 session_id 汇总；`hybrid_search` 拆出 5 段 `time_block`；SSE done 帧 + `/query` 同步接口返回 `node_timings`；前端 Gradio HTML 瀑布图实时渲染，瓶颈节点红色高亮；`after_agent` 多打一行 `[perf]` 节点级汇总日志，单位统一为秒 |
 | **v1.2.2** | 新增图文混合检索：上传 PDF/Word 自动抽内嵌图（PyMuPDF + python-docx），md5 去重存盘；检索时随 chunk 返回，前端 Gradio 画廊实时渲染；新增 `/files/{user_id}/{path}` 私有图片路由（token 鉴权 + 防越权 + 防路径穿越）；`retrieval_engine.hybrid_search` 透传 metadata |
 | **v1.2.1** | 新增 `/query/stream` 流式问答接口（SSE 逐 token 推送）；前端 Gradio 实时打字效果；上传重名检测与覆盖确认；敏感词过滤只查用户原始 query；修复 SSE 中文乱码（增量 UTF-8 解码 + charset 头）；Windows 启动加 `-X utf8` |
 | **v1.2.0** | README 全面更新；docs/部署文档完善 |
