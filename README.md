@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/2024150227/My-RAG)](https://github.com/2024150227/My-RAG/releases)
 
-基于 **LangChain + ChromaDB** 的企业级 RAG 系统，支持多用户私有知识库、混合检索、双 LLM Provider（本地 Ollama / 云端硅基流动）、链路 Hooks 与一键云部署。
+基于 **LangChain + ChromaDB** 的企业级 RAG 系统，支持多用户私有知识库、混合检索、多 LLM Provider（本地 Ollama / 火山方舟 Ark / 硅基流动）、链路 Hooks 与一键云部署。
 
 > 🌐 **线上体验**：[http://47.106.186.17:7860](http://47.106.186.17:7860)（账号 `admin` / 密码 `admin@2026`）
 
@@ -21,7 +21,7 @@
 - 👤 **多用户隔离**：每个账号拥有独立的私有知识库（ChromaDB metadata 区分），私有图片走 token 鉴权静态路由
 
 ### 大语言模型
-- 🔀 **双 Provider 切换**：通过 `LLM_PROVIDER` 环境变量在本地 Ollama 与硅基流动云端 API 间无缝切换
+- 🔀 **多 Provider 可切换**：LLM 走 `LLM_PROVIDER` 三选一（本地 Ollama / 火山方舟 Doubao / 硅基流动），Embedding 走 `EMBED_PROVIDER` 双选一（火山方舟 Doubao / 硅基流动 BGE-M3），rerank 固定走硅基流动 BGE-Reranker-v2-m3；切换 Embedding 需清库重新入库
 - 📡 **流式输出（SSE）**：`/query/stream` 接口逐 token 返回，前端 Gradio 像 ChatGPT 一样实时打字效果
 - 🎯 **链路 Hooks**：`before_agent` / `before_model` / `wrap_model_call` / `after_model` / `after_agent` 五段切片，覆盖鉴权、Prompt 拼装、缓存重试熔断、格式修正、持久化全链路
 - 🔬 **节点级耗时埋点**：基于 `contextvars` 把 8 个关键节点（embedding / 向量检索 / BM25 / 合并 / rerank / 历史 / 缓存 / LLM）的耗时按 session_id 汇总；前端 Gradio 实时渲染 HTML 瀑布图，瓶颈节点红色高亮
@@ -44,8 +44,9 @@
 | 后端 | FastAPI 0.110 + Uvicorn |
 | 前端 | Gradio 4.21（带可选 basic auth） |
 | 向量库 | ChromaDB 0.4.24 |
-| 嵌入 / 重排 | BAAI/bge-m3 + BAAI/bge-reranker-v2-m3（硅基流动 API） |
-| LLM | Ollama（本地 Qwen / DeepSeek 等） *或* SiliconFlow（Qwen2.5-7B-Instruct 等） |
+| 嵌入 | 火山方舟 Doubao Embedding Large *或* BAAI/bge-m3（硅基流动） |
+| 重排 | BAAI/bge-reranker-v2-m3（硅基流动 API） |
+| LLM | Ollama（本地 Qwen / DeepSeek 等）*或* 火山方舟（Doubao Seed / DeepSeek V3）*或* SiliconFlow（Qwen2.5-7B-Instruct） |
 | 缓存 / 会话 | Redis 5.0 |
 | 账号 / 历史 | MySQL 8.0 + SQLAlchemy 2.0 |
 | 文档 | LangChain 0.1 + PyPDF + **PyMuPDF** + openpyxl + python-docx |
@@ -65,8 +66,8 @@ MY-RAG/
 │   │   └── mysql_client.py        # MySQL（用户、历史）
 │   ├── frontend/gradio_app.py     # Gradio UI（含 basic auth）
 │   └── services/                  # 业务核心
-│       ├── llm_service.py         # ★ 双 Provider 实现（ollama / siliconflow）
-│       ├── embedding_service.py   # 调硅基流动 embedding
+│       ├── llm_service.py         # ★ 三 Provider（ollama / ark / siliconflow），OpenAI 兼容协议抽象
+│       ├── embedding_service.py   # ★ 双 Provider（ark / siliconflow）
 │       ├── rerank_service.py      # 调硅基流动 rerank
 │       ├── retrieval_engine.py    # 混合检索（向量 + BM25），透传 metadata + 5 段 time_block
 │       ├── chroma_service.py      # ChromaDB 客户端
@@ -98,7 +99,7 @@ MY-RAG/
 - Python 3.11
 - Redis（本地或容器）
 - MySQL 8（本地或容器）
-- Ollama（本地 LLM 模式需要） *或* 硅基流动 API Key（云端 LLM 模式）
+- Ollama（本地 LLM 模式需要）*或* 火山方舟 API Key（推荐，LLM + Embedding）*或* 硅基流动 API Key（Rerank 必选，LLM/Embedding 可选）
 
 ### 三种部署模式
 
@@ -131,7 +132,8 @@ docker compose up -d
 ```bash
 # 在服务器上
 sudo bash deploy/server-setup.sh                    # 装 Redis/MySQL/Python
-export SILICONFLOW_API_KEY=sk-xxx
+export ARK_API_KEY=ark-xxx                          # 火山方舟（LLM + Embedding）
+export SILICONFLOW_API_KEY=sk-xxx                   # 硅基流动（Rerank）
 export GRADIO_AUTH_PASSWORD='your-password'
 sudo -E bash deploy/install-app.sh                  # 部署应用 + systemd
 ```
@@ -148,10 +150,15 @@ sudo -E bash deploy/install-app.sh                  # 部署应用 + systemd
 
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `LLM_PROVIDER` | LLM 提供方：`ollama` / `siliconflow` | `ollama` |
-| `OLLAMA_MODEL` | 本地模型名 | `qwen:latest` |
-| `SILICONFLOW_LLM_MODEL` | 云端模型 | `Qwen/Qwen2.5-7B-Instruct` |
-| `SILICONFLOW_API_KEY` | 硅基流动 Key（embed / rerank / LLM 共用） | 必填 |
+| `LLM_PROVIDER` | LLM 提供方：`ark` / `ollama` / `siliconflow` | `ark` |
+| `EMBED_PROVIDER` | Embedding 提供方：`ark` / `siliconflow`（切换需清库） | `ark` |
+| `ARK_API_KEY` | 火山方舟 Key（LLM + Embedding） | 必填 |
+| `ARK_BASE_URL` | 火山方舟 API 基址（OpenAI 兼容 /api/v3） | `https://ark.cn-beijing.volces.com/api/v3` |
+| `ARK_LLM_MODEL` | 火山方舟 LLM 模型 | `doubao-1-5-pro-32k-250115` |
+| `ARK_EMBED_MODEL` | 火山方舟 Embedding 模型 | `doubao-embedding-large-text-250515` |
+| `OLLAMA_MODEL` | 本地 Ollama 模型名 | `qwen:latest` |
+| `SILICONFLOW_API_KEY` | 硅基流动 Key（Rerank 必用，LLM/Embedding 可选） | 必填 |
+| `SILICONFLOW_LLM_MODEL` | 硅基流动 LLM 模型 | `Qwen/Qwen2.5-7B-Instruct` |
 | `GRADIO_AUTH_USER` / `GRADIO_AUTH_PASSWORD` | 前端 basic auth | 空 = 不启用 |
 | `MYSQL_HOST/PORT/USER/PASSWORD/DATABASE` | MySQL 连接 | 见 `.env.example` |
 | `REDIS_HOST/PORT` | Redis 连接 | `localhost:6379` |
@@ -286,7 +293,7 @@ gr.Gallery 渲染（浏览器 <img> 通过 /files 路由拉图）
 
 | # | 节点 | 干什么 | 典型耗时 |
 | --- | --- | --- | --- |
-| 1 | `query_embedding` | query 走 BGE-M3 向量化 | 30~80ms |
+| 1 | `query_embedding` | query 向量化（Ark Doubao / BGE-M3） | 30~80ms |
 | 2 | `vector_search` | ChromaDB 向量近邻搜索 | 50~300ms |
 | 3 | `bm25_search` | 关键词召回（与向量检索并行） | 20~80ms |
 | 4 | `merge_dedup` | 双路结果合并 + 去重 | 1~5ms |
@@ -387,6 +394,7 @@ curl -X POST http://localhost:8000/query \
 
 | 版本 | 主要变更 |
 | --- | --- |
+| **v1.2.4** | LLM + Embedding 迁移至火山方舟 Ark：新增 Ark provider（LLM 三选一 / Embedding 双选一），OpenAI 兼容协议抽象统一方法、同步流式均覆盖；Doubao Seed 1.6 / Doubao 1.5 Pro 可选；`config.py` 新增 `ARK_API_KEY` / `EMBED_PROVIDER` 等配置项；`deploy/install-app.sh` .env 模板适配双 Key；rerank 保留硅基流动；注意换 embedding = 向量维度变化，必须清空 ChromaDB 重新入库 |
 | **v1.2.3** | 新增节点级链路耗时埋点 + Gradio 瀑布图可视化：基于 `contextvars` 把 8 个关键节点（embedding / vector / BM25 / merge / rerank / history / cache / LLM）的耗时按 session_id 汇总；`hybrid_search` 拆出 5 段 `time_block`；SSE done 帧 + `/query` 同步接口返回 `node_timings`；前端 Gradio HTML 瀑布图实时渲染，瓶颈节点红色高亮；`after_agent` 多打一行 `[perf]` 节点级汇总日志，单位统一为秒 |
 | **v1.2.2** | 新增图文混合检索：上传 PDF/Word 自动抽内嵌图（PyMuPDF + python-docx），md5 去重存盘；检索时随 chunk 返回，前端 Gradio 画廊实时渲染；新增 `/files/{user_id}/{path}` 私有图片路由（token 鉴权 + 防越权 + 防路径穿越）；`retrieval_engine.hybrid_search` 透传 metadata |
 | **v1.2.1** | 新增 `/query/stream` 流式问答接口（SSE 逐 token 推送）；前端 Gradio 实时打字效果；上传重名检测与覆盖确认；敏感词过滤只查用户原始 query；修复 SSE 中文乱码（增量 UTF-8 解码 + charset 头）；Windows 启动加 `-X utf8` |
