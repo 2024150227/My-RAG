@@ -394,8 +394,7 @@ curl -X POST http://localhost:8000/query \
 
 | 版本 | 主要变更 |
 | --- | --- |
-| **v1.2.4** | LLM + Embedding 迁移至火山方舟 Ark：新增 Ark provider（LLM 三选一 / Embedding 双选一），OpenAI 兼容协议抽象统一方法、同步流式均覆盖；Doubao Seed 1.6 / Doubao 1.5 Pro 可选；`config.py` 新增 `ARK_API_KEY` / `EMBED_PROVIDER` 等配置项；`deploy/install-app.sh` .env 模板适配双 Key；rerank 保留硅基流动；注意换 embedding = 向量维度变化，必须清空 ChromaDB 重新入库 |
-| **v1.2.3** | 新增节点级链路耗时埋点 + Gradio 瀑布图可视化：基于 `contextvars` 把 8 个关键节点（embedding / vector / BM25 / merge / rerank / history / cache / LLM）的耗时按 session_id 汇总；`hybrid_search` 拆出 5 段 `time_block`；SSE done 帧 + `/query` 同步接口返回 `node_timings`；前端 Gradio HTML 瀑布图实时渲染，瓶颈节点红色高亮；`after_agent` 多打一行 `[perf]` 节点级汇总日志，单位统一为秒 |
+| **v1.2.4** | **火山方舟迁移**：LLM Provider 三选一（Ollama / 火山方舟 Doubao / 硅基流动）、Embedding 双选一（Doubao / BGE-M3），OpenAI 兼容协议抽象统一方法、同步流式均覆盖；推荐模型 `doubao-seed-1-6-251015` + `doubao-embedding-large-text-250515`；`config.py` 新增 `ARK_API_KEY` 等 5 项配置，`deploy/install-app.sh` 适配双 Key，rerank 保留硅基流动。<br>**节点级耗时埋点 + 瀑布图**：新增 `app/utils/timer.py`（contextvars 零侵入计时器），8 个节点埋点（embedding / vector / BM25 / merge / rerank / history / cache / LLM）；`hybrid_search` 拆 5 段 `time_block`；`[perf]` 一行汇总日志；前端 Gradio HTML 瀑布图，瓶颈红色高亮；SSE done 帧 + `/query` 返回 `node_timings`。<br>⚠️ 换 embedding 需清空 ChromaDB 重新入库 |
 | **v1.2.2** | 新增图文混合检索：上传 PDF/Word 自动抽内嵌图（PyMuPDF + python-docx），md5 去重存盘；检索时随 chunk 返回，前端 Gradio 画廊实时渲染；新增 `/files/{user_id}/{path}` 私有图片路由（token 鉴权 + 防越权 + 防路径穿越）；`retrieval_engine.hybrid_search` 透传 metadata |
 | **v1.2.1** | 新增 `/query/stream` 流式问答接口（SSE 逐 token 推送）；前端 Gradio 实时打字效果；上传重名检测与覆盖确认；敏感词过滤只查用户原始 query；修复 SSE 中文乱码（增量 UTF-8 解码 + charset 头）；Windows 启动加 `-X utf8` |
 | **v1.2.0** | README 全面更新；docs/部署文档完善 |
