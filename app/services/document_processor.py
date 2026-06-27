@@ -33,6 +33,18 @@ def _safe_stem(filename: str) -> str:
     return safe
 
 
+def compute_doc_hash(file_path: str) -> str:
+    """计算文件的 MD5 哈希（流式读取，大文件友好）。
+
+    用于快速判断文件内容是否变更——doc_hash 一致则跳过整个增量更新链路。
+    """
+    h = hashlib.md5()
+    with open(file_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()[:16]
+
+
 class DocumentProcessor:
     def __init__(self):
         self.max_chunk_size = settings.MAX_CHUNK_SIZE
@@ -213,6 +225,15 @@ class DocumentProcessor:
         images = self.extract_images(file_path, user_id)
         return {"text": text, "images": images}
 
+    @staticmethod
+    def _is_table_separator(line: str) -> bool:
+        """判断是否为 Markdown 表格分隔行（|----|、|:---:| 等）。
+
+        只含 | : - 空格 四种字符的行即为分隔行，直接跳过。
+        """
+        stripped = line.strip()
+        return stripped.startswith('|') and all(ch in '|:- ' for ch in stripped)
+
     def semantic_chunking(self, content: str) -> list:
         chunks = []
         lines = content.split('\n')
@@ -220,14 +241,30 @@ class DocumentProcessor:
         current_chunk = ""
 
         for line in lines:
+            stripped = line.strip()
+
+            # ── 表格分隔行直接跳过（不发散到 current_chunk） ──
+            if self._is_table_separator(line):
+                continue
+
+            # ── 表格行：以 | 开头 → 整表保持在同一切块内 ──
+            if stripped.startswith('|'):
+                current_chunk += line + "\n"
+                continue
+
+            # ── 标题行：切一刀 ──
             if line.startswith('#'):
                 if current_chunk.strip():
                     chunks.append(current_chunk.strip())
                 current_chunk = line + "\n"
-            elif line.strip() == "":
+
+            # ── 空行：切一刀（表格行已被上面的 continue 截住，不会误切表格） ──
+            elif stripped == "":
                 if current_chunk.strip():
                     chunks.append(current_chunk.strip())
                 current_chunk = ""
+
+            # ── 普通文本：超过长度才切 ──
             else:
                 if len(current_chunk) + len(line) > self.max_chunk_size:
                     if current_chunk.strip():

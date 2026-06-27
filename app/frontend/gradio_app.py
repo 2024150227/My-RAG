@@ -83,12 +83,14 @@ def logout_user(token):
 # ==================== 查询函数（集成Hooks） ====================
 
 # 节点配色（按链路阶段分组）
+#   紫   = Query 改写（新增优化环节）
 #   蓝   = 检索类（embedding / vector / BM25）
 #   绿   = 合并 / 后处理
 #   黄   = 重排
 #   灰   = 历史 / 缓存（轻量）
 #   红   = LLM 推理（瓶颈强调色）
 _NODE_PALETTE = [
+    ("query_rewrite",    "Query 改写",  "#9334e6"),
     ("history_fetch",    "历史拉取",    "#9aa0a6"),
     ("query_embedding",  "问题向量化",  "#1a73e8"),
     ("vector_search",    "向量检索",    "#1a73e8"),

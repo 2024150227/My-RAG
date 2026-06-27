@@ -80,6 +80,53 @@ class ChromaService:
             logger.error(f"ChromaDB计数失败: {str(e)}")
             return 0
 
+    def get_by_filename_full(self, user_id: str, filename: str) -> list:
+        """获取某文件的所有 chunk，含 id / document / metadata 完整信息。
+
+        返回 ``[{id, document, metadata}, ...]``，用于增量更新的新旧比对；
+        找不到 / 出错时返回 []。
+        """
+        if not self.client:
+            return []
+        try:
+            res = self.collection.get(
+                where={"$and": [{"user_id": user_id}, {"filename": filename}]},
+                include=["documents", "metadatas"],
+            )
+            ids = res.get("ids", []) or []
+            docs = res.get("documents", []) or []
+            metas = res.get("metadatas", []) or []
+            return [
+                {"id": ids[i], "document": docs[i], "metadata": metas[i] or {}}
+                for i in range(len(ids))
+            ]
+        except Exception as e:
+            logger.error(f"ChromaDB 按文件名查询失败: {str(e)}")
+            return []
+
+    def upsert_documents(
+        self, documents: list, embeddings: list, metadatas: list = None, ids: list = None
+    ) -> bool:
+        """更新或插入文档（ChromaDB 原生 upsert）。
+
+        ID 已存在 → 覆盖；不存在 → 新增。
+        比先 delete 再 add 更高效，且不会出现中间态。
+        """
+        if not self.client:
+            return False
+        try:
+            self.collection.upsert(
+                documents=documents,
+                embeddings=embeddings,
+                metadatas=metadatas,
+                ids=ids,
+            )
+            logger.info(f"Upsert {len(documents)} 个 chunk")
+            return True
+        except Exception as e:
+            logger.error(f"ChromaDB upsert 失败: {str(e)}")
+            return False
+
     def delete_by_user(self, user_id: str) -> bool:
         """删除指定用户的所有文档"""
         if not self.client:

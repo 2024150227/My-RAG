@@ -4,11 +4,13 @@ from pydantic import BaseModel
 from uuid import uuid4
 from typing import Optional, List
 import asyncio
+import hashlib
 import json
 import time
-from app.services.document_processor import document_processor
+from app.services.document_processor import document_processor, _safe_stem, compute_doc_hash
 from app.services.embedding_service import embedding_service
 from app.services.chroma_service import chroma_service
+from app.services.agent_service import agent_service
 from app.services.retrieval_engine import retrieval_engine
 from app.services.llm_service import llm_service
 from app.services.memory_service import memory_service
@@ -235,11 +237,10 @@ async def query(request: QueryRequest, token: Optional[str] = Header(None)):
             session_id = request.session_id or str(uuid4())
             user_id = "anonymous"
         
-        # ==================== 检索相关文档 ====================
-        retrieved_docs = retrieval_engine.hybrid_search(request.query, user_id=user_id)
-        retrieved_docs = [doc for doc in retrieved_docs if doc.get('document')]
-        
-        if not retrieved_docs:
+        # ==================== Agent 多跳检索 ====================
+        context = agent_service.multi_hop_search(request.query, user_id=user_id)
+
+        if not context:
             return {
                 'code': 404,
                 'message': '知识库内容未检索到相关信息',
@@ -250,8 +251,8 @@ async def query(request: QueryRequest, token: Optional[str] = Header(None)):
                 },
                 'request_id': request_id
             }
-        
-        context = "\n\n".join([doc['document'] for doc in retrieved_docs])
+
+        retrieved_docs = [{"document": doc} for doc in context.split("\n\n---\n\n") if doc.strip()]
         
         # ==================== before-model 钩子 ====================
         before_model_result = rag_hooks.before_model(session_id, request.query, context)
@@ -317,7 +318,7 @@ async def query(request: QueryRequest, token: Optional[str] = Header(None)):
         stats = rag_hooks.get_execution_stats(session_id)
 
         # 检索文档涉及到的图片（去重后的相对路径列表）
-        image_urls = _collect_image_urls(retrieved_docs)
+        image_urls = []  # 多跳检索暂不追踪图片
 
         return {
             'code': 200,
@@ -380,14 +381,12 @@ async def query_stream(request: QueryRequest, token: Optional[str] = Header(None
         else:
             session_id = request.session_id or str(uuid4())
             user_id = "anonymous"
+        context = agent_service.multi_hop_search(request.query, user_id=user_id)
 
-        retrieved_docs = retrieval_engine.hybrid_search(request.query, user_id=user_id)
-        retrieved_docs = [doc for doc in retrieved_docs if doc.get('document')]
-
-        if not retrieved_docs:
+        if not context:
             return _sse_error_response(404, '知识库内容未检索到相关信息', request_id, session_id=session_id)
 
-        context = "\n\n".join([doc['document'] for doc in retrieved_docs])
+        retrieved_docs = [{"document": doc} for doc in context.split("\n\n---\n\n") if doc.strip()]
 
         before_model_result = rag_hooks.before_model(session_id, request.query, context)
         if before_model_result["is_blocked"]:
@@ -538,7 +537,7 @@ async def upload_file(
     user_id = auth["user_id"]
 
     try:
-        # 重名检测：默认拒绝；force=True 时先删旧再插新（覆盖语义）
+        # 重名检测：默认拒绝；force=True 时走增量更新
         already_exists = chroma_service.exists_filename(user_id, file.filename)
         if already_exists and not force:
             return {
@@ -548,8 +547,11 @@ async def upload_file(
                 'request_id': request_id,
             }
         if already_exists and force:
-            removed = chroma_service.delete_by_filename(user_id, file.filename)
-            logger.info(f"覆盖上传：已删除旧文件 {file.filename} 的 {removed} 个 chunk")
+            # 覆盖上传时，先读旧 chunk 列表（用于后续增量 diff）
+            old_chunk_map = {}  # {确定性 ID: chunk_hash}
+            old_items = chroma_service.get_by_filename_full(user_id, file.filename)
+            for item in old_items:
+                old_chunk_map[item['id']] = (item['metadata'] or {}).get('chunk_hash', '')
 
         # 文件存到 uploads/<user_id>/，多用户同名不会互相覆盖
         user_dir = f"uploads/{user_id}"
@@ -599,38 +601,110 @@ async def upload_file(
                 'request_id': request_id
             }
 
-        ids = [f"doc_{user_id[:8]}_{uuid4().hex[:8]}_{i}" for i in range(len(valid_chunks))]
-        # ChromaDB metadata 不支持 list，用逗号分隔字符串存图片相对路径。
-        # 第一版：同一文档所有 chunk 共享该文档全部图（不做精细对齐）。
+        # ===== 构建确定性 ID + 内容哈希 =====
+        file_stem = _safe_stem(file.filename)
+        doc_hash = compute_doc_hash(file_path)
         images_csv = ','.join(image_paths)
-        metadatas = [{
-            'filename': file.filename,
-            'chunk_index': i,
-            'user_id': user_id,
-            'images': images_csv,
-        } for i in range(len(valid_chunks))]
 
-        success = chroma_service.add_documents(valid_chunks, valid_embeddings, metadatas, ids)
+        new_chunks_info = []
+        for i, chunk in enumerate(chunks):
+            cid = f"doc_{user_id[:8]}_{file_stem}_{i}"
+            ch = hashlib.md5(chunk.encode()).hexdigest()[:12]
+            new_chunks_info.append({"id": cid, "document": chunk, "chunk_hash": ch})
 
-        if success:
+        # ===== 增量更新 vs 全量新增 =====
+        if old_chunk_map:
+            # ---- 增量路径：只处理变更的 chunk ----
+            old_ids = set(old_chunk_map.keys())
+            new_ids = {item['id'] for item in new_chunks_info}
+
+            to_delete = old_ids - new_ids
+            if to_delete:
+                chroma_service.collection.delete(ids=list(to_delete))
+                logger.info(f"增量更新：文件 {file.filename} 删除 {len(to_delete)} 个过期 chunk")
+
+            changed = [
+                item for item in new_chunks_info
+                if item['id'] not in old_chunk_map
+                or old_chunk_map[item['id']] != item['chunk_hash']
+            ]
+
+            unchanged_count = len(new_chunks_info) - len(changed)
+            if unchanged_count > 0:
+                logger.info(
+                    f"增量更新：文件 {file.filename} 共 {len(new_chunks_info)} 个 chunk，"
+                    f"{unchanged_count} 个未变更跳过 embedding"
+                )
+
+            upserted_count = 0
+            if changed:
+                changed_chunks = [item['document'] for item in changed]
+                changed_embeddings = embedding_service.get_batch_embeddings(changed_chunks)
+
+                valid_chunks, valid_embeddings, valid_metadatas, valid_ids = [], [], [], []
+                for item, embedding in zip(changed, changed_embeddings):
+                    if not embedding:
+                        continue
+                    chunk_idx = int(item['id'].rsplit('_', 1)[-1])
+                    valid_chunks.append(item['document'])
+                    valid_embeddings.append(embedding)
+                    valid_ids.append(item['id'])
+                    valid_metadatas.append({
+                        'filename': file.filename,
+                        'chunk_index': chunk_idx,
+                        'chunk_hash': item['chunk_hash'],
+                        'doc_hash': doc_hash,
+                        'user_id': user_id,
+                        'images': images_csv,
+                    })
+
+                if valid_chunks:
+                    chroma_service.upsert_documents(
+                        valid_chunks, valid_embeddings, valid_metadatas, valid_ids,
+                    )
+                    upserted_count = len(valid_chunks)
+
             return {
                 'code': 200,
                 'message': 'success',
                 'data': {
                     'filename': file.filename,
-                    'chunks_count': len(valid_chunks),
-                    'embeddings_count': len(valid_embeddings),
-                    'images_count': len(image_paths),
+                    'chunks': len(new_chunks_info),
+                    'unchanged': unchanged_count,
+                    'upserted': upserted_count,
+                    'deleted': len(to_delete) if to_delete else 0,
+                    'images': image_paths,
                 },
-                'request_id': request_id
+                'request_id': request_id,
             }
-        else:
-            return {
-                'code': 5002,
-                'message': '数据库连接异常',
-                'data': {},
-                'request_id': request_id
-            }
+
+        # ---- 全量路径（首次上传的新文件）----
+        valid_metadatas = []
+        valid_ids = []
+        for i in range(len(valid_chunks)):
+            info = new_chunks_info[i]
+            valid_ids.append(info['id'])
+            valid_metadatas.append({
+                'filename': file.filename,
+                'chunk_index': i,
+                'chunk_hash': info['chunk_hash'],
+                'doc_hash': doc_hash,
+                'user_id': user_id,
+                'images': images_csv,
+            })
+
+        chroma_service.add_documents(valid_chunks, valid_embeddings, valid_metadatas, valid_ids)
+
+        return {
+            'code': 200,
+            'message': 'success',
+            'data': {
+                'filename': file.filename,
+                'chunks': len(valid_chunks),
+                'images': image_paths,
+            },
+            'request_id': request_id,
+        }
     
     except Exception as e:
         logger.error(f"上传失败: {str(e)}", extra={'request_id': request_id})

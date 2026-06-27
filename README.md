@@ -18,6 +18,9 @@
 - 🖼️ **图文混合检索**：上传 PDF/Word 时自动抽取内嵌图片（PyMuPDF + python-docx），按 md5 去重存盘；检索时随相关 chunk 一并返回，前端 Gradio 画廊实时渲染相关图片
 - ✂️ **语义分块**：基于 Markdown 标题结构的智能切分，块间动态重叠
 - 🔍 **混合检索**：向量检索（BGE-M3）+ BM25，结果走 BGE-Reranker-v2-m3 重排
+- 🧠 **Agent 多跳推理**：复杂问题自动拆解为子查询，逐跳检索 + 充分性判断，信息不足时追加查询（最多 5 跳），应对"A 产品定价？B 客户几折？"类多步问题
+- ✏️ **Query Rewriting**：LLM 在检索前将口语化/含糊 query 改写为专业表述，改写后 query 走向量检索 + 重排，原 query 走 BM25，双路互补
+- 📂 **增量更新**：覆盖上传时按 chunk 级内容哈希 diff，未变更 chunk 跳过 embedding（成本节约 90%+），不再每次全量重算
 - 👤 **多用户隔离**：每个账号拥有独立的私有知识库（ChromaDB metadata 区分），私有图片走 token 鉴权静态路由
 
 ### 大语言模型
@@ -27,11 +30,12 @@
 - 🔬 **节点级耗时埋点**：基于 `contextvars` 把 8 个关键节点（embedding / 向量检索 / BM25 / 合并 / rerank / 历史 / 缓存 / LLM）的耗时按 session_id 汇总；前端 Gradio 实时渲染 HTML 瀑布图，瓶颈节点红色高亮
 - ⚡ **上下文裁剪**：超长 prompt 自动按段落边界回退到 token 上限内
 - 💬 **多轮对话**：基于 Redis 的会话上下文 + MySQL 持久化历史
+- 📎 **来源标注**：LLM 回答时涉及数值、参数、配置项必须标注来源文件名，未标注视为可信度不足
 
 ### 工程与部署
 - 🔐 **账号体系**：注册 / 登录 / Token 校验 / 会话隔离
 - 🛡️ **Gradio basic auth**：前端可选启用账号密码保护，避免公网裸奔
-- 📂 **上传重名检测**：同名文档先弹窗让用户确认覆盖 or 取消，避免误操作
+- 📂 **上传重名检测 + 增量更新**：同名文档先弹窗确认覆盖；确认后走 chunk 级哈希 diff，未变更部分跳过 embedding
 - 🐳 **三种部署模式**：本地开发 / 全 Docker / 云服务器原生（含 1G 内存调优脚本）
 - 📊 **systemd 守护**：FastAPI / Gradio 自动拉起、journalctl 看日志
 
@@ -66,6 +70,7 @@ MY-RAG/
 │   │   └── mysql_client.py        # MySQL（用户、历史）
 │   ├── frontend/gradio_app.py     # Gradio UI（含 basic auth）
 │   └── services/                  # 业务核心
+│       ├── agent_service.py       # ★ Agent 多跳推理编排（拆解→逐跳检索→充分性判断→循环）
 │       ├── llm_service.py         # ★ 三 Provider（ollama / ark / siliconflow），OpenAI 兼容协议抽象
 │       ├── embedding_service.py   # ★ 双 Provider（ark / siliconflow）
 │       ├── rerank_service.py      # 调硅基流动 rerank
@@ -287,20 +292,21 @@ gr.Gallery 渲染（浏览器 <img> 通过 /files 路由拉图）
 
 ## 🔬 链路可观测性
 
-整个 RAG 链路从黑盒拆成 8 个可观测节点，每次问答都自动统计耗时，前端实时渲染瀑布图。
+整个 RAG 链路从黑盒拆成 9 个可观测节点（Agent 多跳场景下每跳独立计时），每次问答都自动统计耗时，前端实时渲染瀑布图。
 
 ### 节点清单
 
 | # | 节点 | 干什么 | 典型耗时 |
 | --- | --- | --- | --- |
-| 1 | `query_embedding` | query 向量化（Ark Doubao / BGE-M3） | 30~80ms |
-| 2 | `vector_search` | ChromaDB 向量近邻搜索 | 50~300ms |
-| 3 | `bm25_search` | 关键词召回（与向量检索并行） | 20~80ms |
-| 4 | `merge_dedup` | 双路结果合并 + 去重 | 1~5ms |
-| 5 | `rerank` | BGE-Reranker-v2-m3 精排 top_k | 500~1500ms |
-| 6 | `history_fetch` | 从 Redis 拉多轮对话历史 | 5~20ms |
-| 7 | `llm_cache_lookup` | 查 LLM 输出缓存（命中跳过推理） | 1~5ms |
-| 8 | `llm_inference` | 真正调 LLM 出答案（流式 / 同步） | 2000~8000ms |
+| 1 | `query_rewrite` | LLM 改写口语化 query（Agent 每跳可能触发） | 200~500ms |
+| 2 | `query_embedding` | query 向量化（Ark Doubao / BGE-M3） | 30~80ms |
+| 3 | `vector_search` | ChromaDB 向量近邻搜索 | 50~300ms |
+| 4 | `bm25_search` | 关键词召回（与向量检索并行） | 20~80ms |
+| 5 | `merge_dedup` | 双路结果合并 + 去重 | 1~5ms |
+| 6 | `rerank` | BGE-Reranker-v2-m3 精排 top_k | 500~1500ms |
+| 7 | `history_fetch` | 从 Redis 拉多轮对话历史 | 5~20ms |
+| 8 | `llm_cache_lookup` | 查 LLM 输出缓存（命中跳过推理） | 1~5ms |
+| 9 | `llm_inference` | 真正调 LLM 出答案（流式 / 同步） | 2000~8000ms |
 
 ### 实现要点
 
@@ -336,10 +342,14 @@ gr.Gallery 渲染（浏览器 <img> 通过 /files 路由拉图）
    ↓
 [before_agent hook] 鉴权 / 起 stats / 绑定 contextvar
    ↓
-hybrid_search 内 5 段 time_block：
-   query_embedding → vector_search ┐
-                                   ├→ merge_dedup → rerank
-                     bm25_search ──┘
+[Agent 多跳推理]（一次或多次循环，最多 5 跳）：
+   ① _decompose() → 子查询列表
+   ② 每跳取一个子查询 → 单跳混合检索
+         ↓
+     Query Rewriting（LLM 改写 → 向量检索）
+         + 原 query → BM25 → merge_dedup → rerank
+         ↓
+   ③ _judge_sufficiency() → 信息够？→ 够则跳出；不够则追加下一跳
    ↓
 [before_model hook] history_fetch + Prompt 拼装 + 上下文裁剪 + 敏感词过滤
    ↓
@@ -355,6 +365,7 @@ hybrid_search 内 5 段 time_block：
 文档分块策略：
 
 - **语义分块**：基于 Markdown 标题层级
+- **表格保护**：Markdown 表格行不被空行或长度限制切散，分隔线 `|---|---|` 自动跳过
 - **动态重叠**：相邻 chunk 保持 10%-20% 重叠
 - **最大长度**：单 chunk ≤ 1000 字符
 
@@ -394,7 +405,8 @@ curl -X POST http://localhost:8000/query \
 
 | 版本 | 主要变更 |
 | --- | --- |
-| **v1.2.4** | **火山方舟迁移**：LLM Provider 三选一（Ollama / 火山方舟 Doubao / 硅基流动）、Embedding 双选一（Doubao / BGE-M3），OpenAI 兼容协议抽象统一方法、同步流式均覆盖；推荐模型 `doubao-seed-1-6-251015` + `doubao-embedding-large-text-250515`；`config.py` 新增 `ARK_API_KEY` 等 5 项配置，`deploy/install-app.sh` 适配双 Key，rerank 保留硅基流动。<br>**节点级耗时埋点 + 瀑布图**：新增 `app/utils/timer.py`（contextvars 零侵入计时器），8 个节点埋点（embedding / vector / BM25 / merge / rerank / history / cache / LLM）；`hybrid_search` 拆 5 段 `time_block`；`[perf]` 一行汇总日志；前端 Gradio HTML 瀑布图，瓶颈红色高亮；SSE done 帧 + `/query` 返回 `node_timings`。<br>⚠️ 换 embedding 需清空 ChromaDB 重新入库 |
+| **v1.2.5** | **Agent 多跳推理**：`agent_service.py` 编排拆解→逐跳检索→LLM 充分性判断→追加查询循环；<br>**Query Rewriting**：检索前 LLM 改写用户 query，改写走向量+重排、原 query 走 BM25 双路互补；<br>**文档增量更新**：覆盖上传按 chunk 级内容哈希 diff，未变更 chunk 跳过 embedding（成本节约 90%+）；<br>**表格切分保护**：Markdown 整表保持在同一块，分隔行自动跳过；<br>**来源标注**：LLM 回答必须标注数值/参数的来源文件名；<br>瀑布图新增 `query_rewrite` 紫色节点 |
+| **v1.2.4** | **火山方舟迁移**：LLM Provider 三选一（Ollama / 火山方舟 Doubao / 硅基流动）、Embedding 双选一（Doubao / BGE-M3），OpenAI 兼容协议抽象统一方法、同步流式均覆盖；推荐模型 `doubao-seed-1-6-251015` + `doubao-embedding-large-text-250515`；`config.py` 新增 `ARK_API_KEY` 等 5 项配置，`deploy/install-app.sh` 适配双 Key，rerank 保留硅基流动。<br>**节点级耗时埋点 + 瀑布图**：新增 `app/utils/timer.py`（contextvars 零侵入计时器），9 个节点埋点（含 query_rewrite）；`hybrid_search` 拆 5 段 `time_block`；`[perf]` 一行汇总日志；前端 Gradio HTML 瀑布图，瓶颈红色高亮；SSE done 帧 + `/query` 返回 `node_timings`。<br>⚠️ 换 embedding 需清空 ChromaDB 重新入库 |
 | **v1.2.2** | 新增图文混合检索：上传 PDF/Word 自动抽内嵌图（PyMuPDF + python-docx），md5 去重存盘；检索时随 chunk 返回，前端 Gradio 画廊实时渲染；新增 `/files/{user_id}/{path}` 私有图片路由（token 鉴权 + 防越权 + 防路径穿越）；`retrieval_engine.hybrid_search` 透传 metadata |
 | **v1.2.1** | 新增 `/query/stream` 流式问答接口（SSE 逐 token 推送）；前端 Gradio 实时打字效果；上传重名检测与覆盖确认；敏感词过滤只查用户原始 query；修复 SSE 中文乱码（增量 UTF-8 解码 + charset 头）；Windows 启动加 `-X utf8` |
 | **v1.2.0** | README 全面更新；docs/部署文档完善 |
