@@ -525,6 +525,7 @@ class RAGHooks:
             return sum(nt.get(name, []) or [0.0])
 
         parts = [
+            f"rw={_sum('query_rewrite'):.3f}s",
             f"emb={_sum('query_embedding'):.3f}s",
             f"vec={_sum('vector_search'):.3f}s",
             f"bm25={_sum('bm25_search'):.3f}s",
