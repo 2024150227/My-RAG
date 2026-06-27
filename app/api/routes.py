@@ -10,6 +10,7 @@ import time
 from app.services.document_processor import document_processor, _safe_stem, compute_doc_hash
 from app.services.embedding_service import embedding_service
 from app.services.chroma_service import chroma_service
+from app.services.agent_service import agent_service
 from app.services.retrieval_engine import retrieval_engine
 from app.services.llm_service import llm_service
 from app.services.memory_service import memory_service
@@ -236,11 +237,10 @@ async def query(request: QueryRequest, token: Optional[str] = Header(None)):
             session_id = request.session_id or str(uuid4())
             user_id = "anonymous"
         
-        # ==================== 检索相关文档 ====================
-        retrieved_docs = retrieval_engine.hybrid_search(request.query, user_id=user_id)
-        retrieved_docs = [doc for doc in retrieved_docs if doc.get('document')]
-        
-        if not retrieved_docs:
+        # ==================== Agent 多跳检索 ====================
+        context = agent_service.multi_hop_search(request.query, user_id=user_id)
+
+        if not context:
             return {
                 'code': 404,
                 'message': '知识库内容未检索到相关信息',
@@ -251,8 +251,8 @@ async def query(request: QueryRequest, token: Optional[str] = Header(None)):
                 },
                 'request_id': request_id
             }
-        
-        context = "\n\n".join([doc['document'] for doc in retrieved_docs])
+
+        retrieved_docs = [{"document": doc} for doc in context.split("\n\n---\n\n") if doc.strip()]
         
         # ==================== before-model 钩子 ====================
         before_model_result = rag_hooks.before_model(session_id, request.query, context)
@@ -318,7 +318,7 @@ async def query(request: QueryRequest, token: Optional[str] = Header(None)):
         stats = rag_hooks.get_execution_stats(session_id)
 
         # 检索文档涉及到的图片（去重后的相对路径列表）
-        image_urls = _collect_image_urls(retrieved_docs)
+        image_urls = []  # 多跳检索暂不追踪图片
 
         return {
             'code': 200,
@@ -381,14 +381,12 @@ async def query_stream(request: QueryRequest, token: Optional[str] = Header(None
         else:
             session_id = request.session_id or str(uuid4())
             user_id = "anonymous"
+        context = agent_service.multi_hop_search(request.query, user_id=user_id)
 
-        retrieved_docs = retrieval_engine.hybrid_search(request.query, user_id=user_id)
-        retrieved_docs = [doc for doc in retrieved_docs if doc.get('document')]
-
-        if not retrieved_docs:
+        if not context:
             return _sse_error_response(404, '知识库内容未检索到相关信息', request_id, session_id=session_id)
 
-        context = "\n\n".join([doc['document'] for doc in retrieved_docs])
+        retrieved_docs = [{"document": doc} for doc in context.split("\n\n---\n\n") if doc.strip()]
 
         before_model_result = rag_hooks.before_model(session_id, request.query, context)
         if before_model_result["is_blocked"]:
