@@ -47,7 +47,7 @@
 | --- | --- |
 | 后端 | FastAPI 0.110 + Uvicorn |
 | 前端 | Gradio 4.21（带可选 basic auth） |
-| 向量库 | ChromaDB 0.4.24 |
+| 向量库 | ChromaDB 0.4.24（暴力 KNN 检索，全量算余弦距离精度 100%） |
 | 嵌入 | 火山方舟 Doubao Embedding Large *或* BAAI/bge-m3（硅基流动） |
 | 重排 | BAAI/bge-reranker-v2-m3（硅基流动 API） |
 | LLM | Ollama（本地 Qwen / DeepSeek 等）*或* 火山方舟（Doubao Seed / DeepSeek V3）*或* SiliconFlow（Qwen2.5-7B-Instruct） |
