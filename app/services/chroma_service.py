@@ -4,6 +4,13 @@ from chromadb.config import Settings
 from app.config import settings
 from app.utils.logger import logger
 
+try:
+    import numpy as np
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+    logger.warning("numpy 未安装，暴力 KNN 将使用纯 Python 模式（小数据集无影响）")
+
 class ChromaService:
     _instance = None
     
@@ -44,6 +51,7 @@ class ChromaService:
             return False
     
     def query(self, query_embedding: list, n_results: int = 3, where: dict = None):
+        """HNSW 索引检索（近似，速度快），保留给需要高性能的场景。"""
         if not self.client:
             return []
         try:
@@ -65,6 +73,62 @@ class ChromaService:
             )]
         except Exception as e:
             logger.error(f"ChromaDB查询失败: {str(e)}")
+            return []
+
+    def knn_search(self, query_embedding: list, n_results: int = 3, where: dict = None) -> list:
+        """暴力 KNN 检索——全量加载所有向量，逐一算余弦距离。
+
+        文档少时用这个，精度 100%（相比 HNSW 的近似搜索）。
+        文档多（>10 万）后建议切回 self.query() 用 HNSW 索引。
+        """
+        if not self.client:
+            return []
+
+        try:
+            # 带 where 过滤时，用 get + where；不过滤时全量加载更高效
+            kwargs_get = {"include": ["embeddings", "documents", "metadatas"]}
+            if where:
+                kwargs_get["where"] = where
+
+            all_data = self.collection.get(**kwargs_get)
+
+            ids = all_data.get("ids", []) or []
+            docs = all_data.get("documents", []) or []
+            metas = all_data.get("metadatas", []) or []
+            embs = all_data.get("embeddings", []) or []
+
+            if not embs:
+                return []
+
+            # numpy 加速 vs 纯 Python 回退
+            if _HAS_NUMPY:
+                q = np.array(query_embedding, dtype=np.float32)
+                v = np.array(embs, dtype=np.float32)
+                q_norm = q / np.linalg.norm(q)
+                v_norms = v / np.linalg.norm(v, axis=1, keepdims=True)
+                sims = np.dot(v_norms, q_norm)
+                dists = 1 - sims
+                top_idx = np.argsort(dists)[:n_results]
+                top_dists = [float(dists[i]) for i in top_idx]
+            else:
+                def _cos_dist(a, b):
+                    dot = sum(x * y for x, y in zip(a, b))
+                    na = sum(x * x for x in a) ** 0.5
+                    nb = sum(x * x for x in b) ** 0.5
+                    return 1 - dot / (na * nb) if na and nb else 1.0
+
+                scored = [(i, _cos_dist(query_embedding, embs[i])) for i in range(len(embs))]
+                scored.sort(key=lambda x: x[1])
+                top_idx, top_dists = zip(*scored[:n_results]) if scored[:n_results] else ([], [])
+
+            return [{
+                'document': docs[i],
+                'metadata': metas[i] if i < len(metas) else {},
+                'distance': top_dists[j],
+            } for j, i in enumerate(top_idx)]
+
+        except Exception as e:
+            logger.error(f"ChromaDB暴力KNN失败: {str(e)}")
             return []
 
     def count(self, user_id: str = None) -> int:

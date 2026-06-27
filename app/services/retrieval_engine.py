@@ -85,10 +85,10 @@ class RetrievalEngine:
         if not query_embedding:
             return []
 
-        # 2. 向量检索（user_id 不为空时按用户过滤；为空时不过滤，兼容老调用 / 系统级查询）
+        # 2. 向量检索（暴力 KNN，文档少时精度优先）
         where = {"user_id": user_id} if user_id else None
         with time_block("vector_search"):
-            vector_results = chroma_service.query(
+            vector_results = chroma_service.knn_search(
                 query_embedding, n_results=self.top_k * 2, where=where
             )
 

@@ -17,7 +17,7 @@
 - 📄 **多格式文档**：Markdown / PDF / Word(.docx) / TXT / Excel
 - 🖼️ **图文混合检索**：上传 PDF/Word 时自动抽取内嵌图片（PyMuPDF + python-docx），按 md5 去重存盘；检索时随相关 chunk 一并返回，前端 Gradio 画廊实时渲染相关图片
 - ✂️ **语义分块**：基于 Markdown 标题结构的智能切分，块间动态重叠
-- 🔍 **混合检索**：向量检索（BGE-M3）+ BM25，结果走 BGE-Reranker-v2-m3 重排
+- 🔍 **混合检索**：暴力 KNN（全量余弦距离）+ BM25，结果走 BGE-Reranker-v2-m3 重排
 - 🧠 **Agent 多跳推理**：复杂问题自动拆解为子查询，逐跳检索 + 充分性判断，信息不足时追加查询（最多 5 跳），应对"A 产品定价？B 客户几折？"类多步问题
 - ✏️ **Query Rewriting**：LLM 在检索前将口语化/含糊 query 改写为专业表述，改写后 query 走向量检索 + 重排，原 query 走 BM25，双路互补
 - 📂 **增量更新**：覆盖上传时按 chunk 级内容哈希 diff，未变更 chunk 跳过 embedding（成本节约 90%+），不再每次全量重算
@@ -47,7 +47,7 @@
 | --- | --- |
 | 后端 | FastAPI 0.110 + Uvicorn |
 | 前端 | Gradio 4.21（带可选 basic auth） |
-| 向量库 | ChromaDB 0.4.24 |
+| 向量库 | ChromaDB 0.4.24（暴力 KNN 检索，全量算余弦距离精度 100%） |
 | 嵌入 | 火山方舟 Doubao Embedding Large *或* BAAI/bge-m3（硅基流动） |
 | 重排 | BAAI/bge-reranker-v2-m3（硅基流动 API） |
 | LLM | Ollama（本地 Qwen / DeepSeek 等）*或* 火山方舟（Doubao Seed / DeepSeek V3）*或* SiliconFlow（Qwen2.5-7B-Instruct） |
@@ -300,7 +300,7 @@ gr.Gallery 渲染（浏览器 <img> 通过 /files 路由拉图）
 | --- | --- | --- | --- |
 | 1 | `query_rewrite` | LLM 改写口语化 query（Agent 每跳可能触发） | 200~500ms |
 | 2 | `query_embedding` | query 向量化（Ark Doubao / BGE-M3） | 30~80ms |
-| 3 | `vector_search` | ChromaDB 向量近邻搜索 | 50~300ms |
+| 3 | `vector_search` | ChromaDB 暴力 KNN（全量算余弦距离，精度 100%） | 50~500ms |
 | 4 | `bm25_search` | 关键词召回（与向量检索并行） | 20~80ms |
 | 5 | `merge_dedup` | 双路结果合并 + 去重 | 1~5ms |
 | 6 | `rerank` | BGE-Reranker-v2-m3 精排 top_k | 500~1500ms |
