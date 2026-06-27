@@ -33,6 +33,18 @@ def _safe_stem(filename: str) -> str:
     return safe
 
 
+def compute_doc_hash(file_path: str) -> str:
+    """计算文件的 MD5 哈希（流式读取，大文件友好）。
+
+    用于快速判断文件内容是否变更——doc_hash 一致则跳过整个增量更新链路。
+    """
+    h = hashlib.md5()
+    with open(file_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()[:16]
+
+
 class DocumentProcessor:
     def __init__(self):
         self.max_chunk_size = settings.MAX_CHUNK_SIZE
